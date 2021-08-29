@@ -6,6 +6,7 @@ import seaborn as sns
 import imageio
 import cv2
 import argparse
+import scipy
 from datetime import datetime
 
 
@@ -36,9 +37,9 @@ def plot_G_dx_dt(df, direction="x", groupby="experiment", dt=1, kind="kde", filt
     else:
         ax = kwargs["ax"]
 
-    ax.set_xlabel("\u0394" + direction + "[\u03BCm]")
-    ax.set_ylabel("G")
-    ax.set_title("G(\u0394" + direction + ",\u0394t=" + str(dt) + " frames)")
+    ax.set_xlabel(fr'$\Delta {direction} [\mu m]$')
+    ax.set_ylabel(r'$G$')
+    ax.set_title(fr'$G(\Delta {direction}, \Delta t = {dt}$ frames)')
     ax.set_yscale('log')
 
     dx = "d" + direction  # this can be dx or dy
@@ -58,9 +59,10 @@ def plot_G_dx_dt(df, direction="x", groupby="experiment", dt=1, kind="kde", filt
 
     G = G[G[dx].abs() > filter_diff]
 
+    G = G.reset_index()  # important!
     # we need this if instead of using sns.displot because we need to specify the ax input (in kwargs)
     if kind == "kde":
-        kp = sns.kdeplot(data=G, x=dx, hue=groupby, **kwargs,
+        kp = sns.kdeplot(data=G, x=dx, hue=groupby, common_norm=False, **kwargs,
                          palette=sns.color_palette("hls", len(G.groupby(groupby))))
     elif kind == "hist":
         kp = sns.histplot(data=G, x=dx, hue=groupby, **kwargs,
@@ -127,7 +129,8 @@ def plotTrajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarker
     p = df.groupby(groupby).plot(x="x", y="y", legend=False, **kwargs)
     p = p[p.index[0]].get_lines()
 
-    ax.axis('equal')
+    # ax.axis('square')
+    # ax.set_aspect('equal', 'box')
     # ax.set_xlabel("x")
     # ax.set_ylabel("y")
 
@@ -318,17 +321,32 @@ def animate_G_dx_dt(df, d_array=np.arange(1, 101), x="x", kind="kde", video_name
     return
 
 
-def animate_Trajectories(df, t_end_array=np.arange(0, 501), startAtOrigin=True, fixedLimits=True,
+def animate_Trajectories(df, t_end_array=np.arange(0, 501), startAtOrigin=True, fixedLimits=True, preStr="",
                          video_name="traj_video", gif_name="traj_gif"):
     fig = plt.figure()
     ax = plt.gca()
-    ax.set_xlabel(r'$x-x_{0} [\mu m]$')
-    ax.set_xlabel(r'$y-y_{0} [\mu m]$')
 
-    if startAtOrigin and fixedLimits:
-        lim = max(
-            (df['x'] - df.groupby('particle')['x'].transform('first')).abs().max(),
-            (df['y'] - df.groupby('particle')['y'].transform('first')).abs().max())
+    if fixedLimits:
+        if startAtOrigin:
+            lim = 1.01 * max(
+                (df['x'] - df.groupby('particle')['x'].transform('first')).abs().max(),
+                (df['y'] - df.groupby('particle')['y'].transform('first')).abs().max())
+            xlim = [-lim, lim]
+            ylim = [-lim, lim]
+        else:
+            xlim = [df['x'].min(), df['x'].max()]
+            ylim = [df['y'].min(), df['y'].max()]
+            # to make axes square
+            if (xlim[1] - xlim[0]) > (ylim[1] - ylim[0]):
+                delta = (xlim[1] - xlim[0]) / 2
+                center = (ylim[0] + ylim[1]) / 2
+                ylim[0] = center - delta
+                ylim[1] = center + delta
+            else:
+                delta = (ylim[1] - ylim[0]) / 2
+                center = (xlim[0] + xlim[1]) / 2
+                xlim[0] = center - delta
+                xlim[1] = center + delta
 
     # fig.canvas.draw()
     # plt.show(block=False)
@@ -336,19 +354,30 @@ def animate_Trajectories(df, t_end_array=np.arange(0, 501), startAtOrigin=True, 
     files_path = ".\\images_to_vid\\"
     for i, t_end in enumerate(t_end_array):
         plt.cla()
-        p = plotTrajectories(df, t_end=t_end, doneTrajNoMarker=True, startAtOrigin=startAtOrigin, ax=ax)
-        ax.set_title(f't = {t_end} frames')
-        if fixedLimits:  # keep the same limits each loop iteration
-            ax.set_xlim([-lim, lim])
-            ax.set_ylim([-lim, lim])
 
+        p = plotTrajectories(df, t_end=t_end, doneTrajNoMarker=True, startAtOrigin=startAtOrigin, ax=ax)
+
+        ax.set_title(f't = {t_end} frames')
+        if startAtOrigin:
+            ax.set_xlabel(r'$x-x_{0} [\mu m]$')
+            ax.set_ylabel(r'$y-y_{0} [\mu m]$')
+        else:
+            ax.set_xlabel(r'$x [\mu m]$')
+            ax.set_ylabel(r'$y [\mu m]$')
+
+        if fixedLimits:  # keep the same limits each loop iteration
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
+        ax.set_aspect('equal', 'box')
         # fig.canvas.draw()
         # fig.canvas.flush_events()
         # create file name and append it to a list
-        filename = files_path + f'{i:04d}.png'
+        filename = files_path + f'{preStr}{i:04d}.png'
         filenames.append(filename)
         # save frame
         plt.savefig(filename, format="png", dpi=400)
+        plt.savefig(".\\for_latex\\" + f'{preStr}{i}.png', format="png", dpi=400)
+
         # handle the stats df
 
     createVideo(path=files_path, fps=20.0, output_name=video_name, image_type="png")
@@ -358,7 +387,7 @@ def animate_Trajectories(df, t_end_array=np.arange(0, 501), startAtOrigin=True, 
         os.remove(files_path + f)
 
 
-def tempHistGK(df,n_particle=1,period = 5):
+def tempHistGK(df, n_particle=1, period=5):
     df_G = df.groupby("experiment").get_group("G on G ; s=160")
     df_K = df.groupby("experiment").get_group("K on K ; s=0")
     # df = pd.concat([df.groupby("experiment").get_group(exp) for i, exp in enumerate(["G on G ; s=160",
@@ -378,18 +407,150 @@ def tempHistGK(df,n_particle=1,period = 5):
         ax.set_yscale('linear')
         plt.show()
 
-    def trajLengthStats(df):
-        for i, exp in enumerate(df.experiment.unique()):
-            d = df.groupby("experiment").get_group(exp).groupby("particle").apply(len).to_frame()
-            d = d.rename(columns={0: "len"})
-            d.loc[:, "experiment"] = exp
-            if i == 0:
-                D = d
-            else:
-                D = D.append(d)
-        sns.histplot(data=D, x="len", hue="experiment")
-        fig = plt.figure()
-        ax = plt.gca()
-        ax.set_xscale('log')
-        # ax.set_yscale('log')
-        plt.show()
+def showTrajLengthStats(df):
+    for i, exp in enumerate(df.experiment.unique()):
+        d = df.groupby("experiment").get_group(exp).groupby("particle").apply(len).to_frame()
+        d = d.rename(columns={0: "len"})
+        d.loc[:, "experiment"] = exp
+        if i == 0:
+            D = d
+        else:
+            D = D.append(d)
+    sns.histplot(data=D, x="len", hue="experiment")
+    fig = plt.figure()
+    ax = plt.gca()
+    ax.set_xscale('log')
+    # ax.set_yscale('log')
+    plt.show()
+
+
+def animate_G_dx_dt_with_conv(df, d_array=np.arange(1, 101), x="x", kind="kde", video_name="myvideo", gif_name="mygif",
+                              var_name="myvar", preStr="", compare_conv=True, xlim=60):
+    # Create gif and mp4 and variance plot of G(delta x/y, delta t)
+    # Inputs:  1. dataframe
+    #          2. d_array - delta t array in frame units
+    #          3. x = "x" or "y"
+    #          4. mode = "kde" or "hist"
+    # Outputs: 1. mp4 file with G(dx,dt) animation
+    #          2. gif file with G(dx,dt) animation
+    #          3. png file variance and counts vs dt (var is solid line, counts dashed)
+
+    # obtain x,y for convolutions
+    df = df.sort_index()
+    if compare_conv:
+        groups = df["experiment"].unique().tolist()
+        xdata = []
+        ydata_init = []
+        ydata_fourier_init = []
+        ydata_fourier = []
+        ydata = []
+        colors = sns.color_palette("hls", len(df.groupby("experiment")))
+        for i, g in enumerate(groups):
+            kp_stam = plot_G_dx_dt(df.groupby("experiment").get_group(g), dt=int(d_array[0]), direction=x,
+                                   groupby="experiment", kind="kde", gridsize=10 ** 4,
+                                   filter_diff=0.0, return_stats=False)  # no ax
+
+            lines = plt.gca().get_lines()
+            L = lines[0]
+            xdata.append(L.get_xdata())
+            ydata_init.append(L.get_ydata() / np.trapz(L.get_ydata(), L.get_xdata()))  # normalize
+            colors.append(L.get_color())
+
+        # now add padding
+        for i, X in enumerate(xdata):
+            xrange = max(X) - min(X)
+            dx = xrange / len(X)
+            center = X[ydata_init[i].argmin()]
+            XX = np.arange(-xlim * 10 + center, xlim * 10 + center+1, step=dx) #symmetric array
+            YY = 0*XX
+            ind_start=np.argmin(np.abs(XX-X[0]))
+            for k,Xk in enumerate(X):
+                YY[ind_start+k]=ydata_init[i][k]
+            xdata[i]=XX
+            ydata_init[i]=YY
+            ydata_fourier_init.append(np.fft.fft(YY))
+        plt.close('all')
+
+        def gauss(xi, a, x0, sigma):
+            return a * np.exp(-(xi - x0) ** 2 / (2 * sigma ** 2)) / (sigma * np.sqrt(2 * np.pi))
+
+    # now we really plot
+    fig = plt.figure()
+    ax = plt.gca()
+
+    # fig.canvas.draw()
+    # plt.show(block=False)
+    filenames = []
+    files_path = ".\\images_to_vid\\"
+    for i, d in enumerate(d_array):
+        plt.cla()
+        ax.set_xlim([-xlim, xlim])
+        if kind == "kde":
+            ax.set_ylim([1e-6, 1])
+        ax.set_yscale('log')
+        kp, cur_stats_df = plot_G_dx_dt(df, dt=d, ax=ax, direction=x, groupby="experiment", kind=kind,
+                                        filter_diff=0.0, return_stats=True)
+        if compare_conv:
+            for j, group in enumerate(groups):
+                if i == 0:
+                    ydata.append(ydata_init[j])
+                    ydata_fourier.append(ydata_fourier_init[j])
+                    center_gaussian = 0
+                else:
+                    ydata_fourier[j]= ydata_fourier[j] * ydata_fourier_init[j]
+                    ydata[j] = np.real(np.fft.ifft(ydata_fourier[j]))
+                    ydata[j] = np.maximum(ydata[j],0) #its ok to discard imaginary and take positive
+                    if i % 2 == 0:
+                        ydata[j]=np.fft.fftshift(ydata[j])
+                    ydata[j] = ydata[j] / np.trapz(ydata[j], xdata[j])  # normalize
+                    # now center around 0
+                    popt, pcov = scipy.optimize.curve_fit(gauss, xdata[j], ydata[j],
+                                                          p0=[1, xdata[j][np.argmax(ydata[j])], np.sqrt(1 + i)])
+                    center_gaussian = popt[1]
+                plt.plot(xdata[j] - center_gaussian, ydata[j], "--", color=colors[j])
+
+        # fig.canvas.draw()
+        # fig.canvas.flush_events()
+        # create file name and append it to a list
+        filename = files_path + f'{i:04d}.png'
+        filenames.append(filename)
+        # save frame
+        plt.savefig(filename, format="png", dpi=400)
+        #plt.savefig(".\\for_latex\\" + f'{preStr}{i}.png', format="png", dpi=400)
+        plt.savefig("C:\\Users\\Amit\\OneDrive - mail.tau.ac.il\\for_latex\\" + f'{preStr}{i}.png', format="png", dpi=400)
+
+
+        # handle the stats df
+        if i == 0:
+            stats_df = cur_stats_df
+        else:
+            stats_df = stats_df.append(cur_stats_df)
+
+    createVideo(path=files_path, fps=6.0, output_name=video_name, image_type="png")
+    createGif(path=files_path, buffer=5, output_name=gif_name, image_type="png")
+
+    for f in os.listdir(files_path):
+        os.remove(files_path + f)
+
+    if len(stats_df) > 0:
+        backupBeforeSave(os.getcwd() + "\\stats_df.fea")
+        stats_df.reset_index().to_feather(os.getcwd() + "\\stats_df.fea")
+        stats_df = pd.read_feather(os.getcwd() + "\\stats_df.fea")
+        stats_fig = plt.figure()
+        sns.lineplot(data=stats_df, x="dt", y="var", hue="experiment")
+        ax1 = plt.gca()
+        ax1.set_xlabel(r'$\Delta t [frames]$')
+        ax2 = plt.twinx()
+        sns.lineplot(data=stats_df, x="dt", y="count", hue="experiment", linestyle=":", ax=ax2)
+        ax2.get_legend().remove()
+
+        ax1.set_xscale("log")
+        ax1.set_yscale("log")
+        ax2.set_xscale("log")
+        ax2.set_yscale("log")
+
+        ax1.set_ylabel(rf'$Var(G(\Delta {x},\Delta t)) [\mu m^2]$')
+
+        backupBeforeSave(os.getcwd() + "\\" + var_name + ".png")
+        plt.savefig(var_name + ".png", format="png", dpi=400)
+    return

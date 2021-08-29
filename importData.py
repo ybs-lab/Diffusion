@@ -88,21 +88,23 @@ def addDisplacement(df, ax):
         df = df[columns_new]
     return df
 
+
 def removeImmobileParticle(df, t_record, cutoff_dist):
     # t_record in sec, cutoff_dist in micrometers
     D = df.copy()[["particle", "t", "x", "y"]]
     D.loc[:, "keepIndex"] = True
     particles = D.particle.unique()
-    #this is not really msd but just (r(t)-r(0))^2
+    # this is not really msd but just (r(t)-r(0))^2
     D['MSD'] = (D['x'] - D.groupby('particle')['x'].transform('first')).pow(2) + (
-                D['y'] - D.groupby('particle')['y'].transform('first')).pow(2)
+            D['y'] - D.groupby('particle')['y'].transform('first')).pow(2)
     G = D.groupby("particle")
     for particle_id in particles:
         x = G.get_group(particle_id)
         if x[x["t"] <= t_record].MSD.max() < (cutoff_dist ** 2):
             D.loc[x.index, "keepIndex"] = False
 
-    return df[D["keepIndex"]].reset_index()
+    return df[D["keepIndex"]].reset_index(drop=True)
+
 
 def importAll():
     default_file_name = "mydata.fea"
@@ -110,8 +112,8 @@ def importAll():
         df = pd.read_feather(os.getcwd() + "\\" + default_file_name)
     else:
         fps = 50
-        P1 = ["G", "K"]
-        P2 = ["G", "K"]
+        P1 = ["G", "K", "R"]
+        P2 = ["G", "K", "W"]
         salinity = [0, 60, 110, 160]
         df = readFromCSV(P1, P2, salinity)
         df = setInitFrame(df)

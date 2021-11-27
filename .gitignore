@@ -2,3 +2,5 @@
 files/
 images_to_vid/
 *.fea
+__pycache__/
+.ipynb_checkpoints/

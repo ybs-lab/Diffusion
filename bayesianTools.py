@@ -1,5 +1,7 @@
 import numpy as np
 # import autograd.numpy as np
+# from autograd import grad, jacobian, hessian
+# from autograd.extend import primitive, defvjp
 import itertools
 from multiprocessing import Pool
 import scipy.optimize
@@ -8,11 +10,7 @@ from extras import backupBeforeSave
 import warnings
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
-from numpy import math
-
-
-# from autograd import grad, jacobian, hessian
-# from autograd.extend import primitive, defvjp
+from scipy.special import factorial, comb
 
 
 def estSpatialProb(dt, dr2, x, y, regime, D, A):
@@ -75,7 +73,7 @@ def kEventsProb(K, init_state, T, T_stick, T_unstick):
     # don't confuse with k index of summation
 
     if np.abs(T_stick - T_unstick) < 0.001:  # simply Poisson
-        P = (T / T_stick) ** (K) * np.exp(-T / T_stick) / np.math.factorial(K)
+        P = (T / T_stick) ** (K) * np.exp(-T / T_stick) / factorial(K)
 
     else:
         if init_state == 0:  # 0=free 1=stuck
@@ -98,9 +96,9 @@ def kEventsProb(K, init_state, T, T_stick, T_unstick):
                 for k in range(m):
                     p = 0
                     for n in range(m + k + 1):
-                        p = p + (-X) ** n / math.factorial(n)
+                        p = p + (-X) ** n / factorial(n)
                     p = p * np.exp(-T / t1) - 1 * np.exp(-T / t2)
-                    P = P + p * math.comb(m + k, k) * X ** (m - 1 - k) / math.factorial(m - 1 - k)
+                    P = P + p * comb(m + k, k) * X ** (m - 1 - k) / factorial(m - 1 - k)
                 P = (-1) ** m * P * (t1 * t2 / (t1 - t2) ** 2) ** m
             else:
                 m = int((K + 1) / 2)
@@ -108,10 +106,15 @@ def kEventsProb(K, init_state, T, T_stick, T_unstick):
                 for k in range(m):
                     p = 0
                     for n in range(m + k):
-                        p = p + (-X) ** n / math.factorial(n)
+                        p = p + (-X) ** n / factorial(n)
                     p = p * np.exp(-T / t1) - 1 * np.exp(-T / t2)
-                    P = P + p * math.comb(m - 1 + k, k) * X ** (m - 1 - k) / math.factorial(m - 1 - k)
+                    P = P + p * comb(m - 1 + k, k) * X ** (m - 1 - k) / factorial(m - 1 - k)
                 P = (-1) ** m * P * r1 * (r1 * r2) ** (m - 1) / (r1 - r2) ** (2 * m - 1)
+
+    # TEMPORARY FIX TO UNDERFLOW PROBLEMS:
+    if P < 0 and K > 10:
+        P = kEventsProb(K - 2, init_state, T, T_stick, T_unstick)
+
     return P
 
 
@@ -278,7 +281,27 @@ def particleLikelihood(df_in, T_stick, T_unstick, D, A, mode):
         return df, max_likelihood
 
 
-def experimentLikelihood(df, T_stick, T_unstick, D, A, Parallelized=True, equal_particle_weight=False):
+def labeledParticleLikelihood(particle_df, T_stick, T_unstick, D, A):
+    trajData = extract_trajData_from_df(particle_df)  # this eliminates the need for df (faster calculations)
+    state = particle_df["state"].values
+    init_state = state[1]  # second value
+    t = particle_df.t.values
+    T = t[-1] - t[0]
+    ind = state == 0.5
+    ind[0] = False
+    ind[-1] = False
+    t_stick_unstick = t[ind]
+    K = len(t_stick_unstick)
+    dt_for_jac = 1.
+
+    logP_k = np.log(kEventsProb(K, init_state, T, T_stick, T_unstick))
+    logL_traj = specificTrajectoryLikelihood(trajData, init_state, t_stick_unstick, dt_for_jac, T_stick, T_unstick, D,
+                                             A)
+    logL_total = logP_k + logL_traj
+    return logL_total
+
+
+def experimentLikelihood(df, T_stick, T_unstick, D, A, Parallelized=False, equal_particle_weight=False):
     t_start = time.time()
 
     particles_array = df.particle.unique()
@@ -295,8 +318,8 @@ def experimentLikelihood(df, T_stick, T_unstick, D, A, Parallelized=True, equal_
         args_iterable = []
         logp_experiment = 0
         with ProcessPoolExecutor(max_workers=1) as executor:
-            for j, logp_particles in enumerate(executor.map(particleLikelihood, particle_df, repeat(T_stick),
-                                                            repeat(T_unstick), repeat(D), repeat(A), repeat(0))):
+            for j, logp_particles in enumerate(executor.map(labeledParticleLikelihood, particle_df, repeat(T_stick),
+                                                            repeat(T_unstick), repeat(D), repeat(A))):
                 logp_experiment += logp_particles * weights[j]
                 print(j)
         # for i in particles_array:
@@ -307,7 +330,7 @@ def experimentLikelihood(df, T_stick, T_unstick, D, A, Parallelized=True, equal_
     else:
         logp_particles = np.zeros(len(particles_array), dtype=object)
         for i, particle_id in enumerate(particles_array):
-            logp_particles[i] = particleLikelihood(grouped.get_group(particle_id), T_stick, T_unstick, D, A)
+            logp_particles[i] = labeledParticleLikelihood(grouped.get_group(particle_id), T_stick, T_unstick, D, A)
         logp_experiment = np.sum(logp_particles * weights)
 
     try:
@@ -324,8 +347,8 @@ def experimentLikelihood(df, T_stick, T_unstick, D, A, Parallelized=True, equal_
     return logp_experiment
 
 
-def basicMaxLikelihood(df, x0, cons_arr=[0.1, 0.1, 1., 0.05], scaling_factor=[1., 1., 10., 100.], usePar=False,
-                       maxIter=100, savefile_extra=""):
+def basicMaxLikelihood(df, x0, cons_arr=[0.1, 0.1, 1., 0.0001], scaling_factor=[10., 10., 10., 100.], usePar=False,
+                       maxIter=100, savefile_extra="", fixedArguments=[False, False, False, False]):
     # T_stick | T_unstick | D | A
     # scaling factor > 1 is for increasing constraints and decreasing value in function (too small vars that make the constraint too small and the optimizer crosses it)
     cons_arr = np.array(cons_arr)
@@ -334,6 +357,9 @@ def basicMaxLikelihood(df, x0, cons_arr=[0.1, 0.1, 1., 0.05], scaling_factor=[1.
     x0_orig = x0
     x0 = x0 * scaling_factor
     cons_arr = cons_arr * scaling_factor
+
+    fixedArgs = np.where(np.asarray(fixedArguments))
+
     L = lambda x: -1 * experimentLikelihood(df, x[0] / scaling_factor[0], x[1] / scaling_factor[1],
                                             x[2] / scaling_factor[2], x[3] / scaling_factor[3], Parallelized=usePar)
 
@@ -351,9 +377,10 @@ def basicMaxLikelihood(df, x0, cons_arr=[0.1, 0.1, 1., 0.05], scaling_factor=[1.
     t_start = time.time()
     # minimum = scipy.optimize.minimize(L, x0, constraints=cons, options={'disp': True, 'maxiter': maxIter})
     if usePar:
-        minimum = scipy.optimize.minimize(L, x0=x0, constraints=cons)
+        minimum = scipy.optimize.minimize(L, x0=x0, constraints=cons)  # , maxIter=maxIter)
     else:
-        minimum = scipy.optimize.minimize(L, x0=x0, constraints=cons)  # , jac=jacobian(L))  # ,  hess=hessian(L))
+        minimum = scipy.optimize.minimize(L, x0=x0, constraints=cons,
+                                          )#jac=jacobian(L)),  # maxIter=maxIter)  # ,  hess=hessian(L))
     filename = "likelihood_data_opt" + "_" + savefile_extra
     filepath = "./files/" + filename
     backupBeforeSave(filepath)

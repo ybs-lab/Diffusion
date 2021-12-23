@@ -2,9 +2,16 @@ import os
 import numpy as np
 import pandas as pd
 import scipy.spatial
-from bayesianTools import segmentTraj, particleLikelihood
+import glob
 from itertools import repeat
 from concurrent.futures import ProcessPoolExecutor
+import extras
+from bayesianTools import segmentTraj, particleLikelihood
+
+TRAJECTORIES_DIR = ".\\Trajectories"
+DATA_DIR = ".\\Data"
+IMAGING_PARAMETERS_PATH = ".\\Resources\\Parameters\\imaging_parameters_table.csv"
+MODEL_PARAMETERS_PATH = ".\\Resources\\Parameters\\model_parameters_table.csv"
 
 
 def renameParticleID(df, offset):
@@ -13,55 +20,52 @@ def renameParticleID(df, offset):
     particleIDs = pd.unique(df.particle)
     Nparticles = len(particleIDs)
     dict_ID_to_index = dict(zip(particleIDs, offset + np.arange(Nparticles)))
-    df.particle = df.particle.replace(dict_ID_to_index)
+    df.particle = vec_translate(df.particle, dict_ID_to_index)
     return Nparticles
 
 
-def readFromCSV(P1, P2, salinity, threshold=100):
-    # Insert only tuples to this function (for now)
-    # Read csv files with trajectories from local folder (P1 on P2 with specific salinity)
-    # Multiple files are concatenated and particle IDs are renamed
+def readFromCSV(traj_path, threshold=1000000):
+    # Return a pandas dataframe with all the experimental data found in input path.
+    # In directory traj_path, each different folder is considered a different experiment
+    # threshold is related to breaking of long trajectories, not recommended to use!
+    #
+    # Notes:
+    # Multiple files are concatenated and particle IDs are renamed such that all particle IDs are unique
     # Also drop all columns except permitted ones
 
     allowed_columns = ['particle', 'frame', 'x', 'y', 'mass']  # in the desired order
     offset = 0
-    for i in range(len(P1)):
-        for j in range(len(P2)):
-            for k in range(len(salinity)):
-                file_dir = os.getcwd() + "/Trajectories/" + P1[i] + "on" + P2[j] + "/Salinity_" + str(
-                    salinity[k]) + "/"
-                if not (os.path.isdir(file_dir)):
-                    # print("Directory not found: " + file_dir)  #commented this because no 60/110 salinity for GonK
-                    continue
-                files = os.listdir(file_dir)
-                if len(files) == 0:
-                    print("No files found in directory: " + file_dir)
-                    continue
+    experiments = os.listdir(traj_path)
+    if len(experiments) == 0:
+        print("No folders found in directory: " + traj_path)
+        df = []
+        return
+
+    for n_exp, experiment in enumerate(experiments):
+        fullpath = traj_path + "\\" + experiment
+        files = os.listdir(fullpath)
+        if len(files) == 0:
+            print("No files found in directory: " + fullpath)
+            continue
+        else:
+            for n, file in enumerate(files):
+                cur_df = pd.read_csv(fullpath + "\\" + file)
+                cur_df.drop(cur_df.columns.difference(allowed_columns), axis=1,
+                            inplace=True)  # remove unwanted columns
+                cur_df = cur_df[allowed_columns]  # reorder columns
+                cur_df["particle"] = cur_df["particle"].astype('int')  # convert to int
+                cur_df["experiment"] = experiment
+                # make sure the dataframe is well sorted
+                cur_df = cur_df.sort_values(["particle", "frame"])
+                cur_df.index = range(len(cur_df))
+                if threshold <= 1000:
+                    cur_df = breakLongTrajectory(cur_df, threshold)
+                N_particles = renameParticleID(cur_df, offset)
+                offset = offset + N_particles
+                if "df" not in locals():
+                    df = cur_df
                 else:
-                    for n in range(len(files)):
-                        cur_df = pd.read_csv(file_dir + files[n])
-                        cur_df.drop(cur_df.columns.difference(allowed_columns), axis=1,
-                                    inplace=True)  # remove unwanted columns
-                        cur_df = cur_df[allowed_columns]  # reorder columns
-                        cur_df["particle"] = cur_df["particle"].astype('int')  # convert to int
-                        cur_df["peptides"] = np.full(len(cur_df), P1[i] + " on " + P2[j])  # add peptides
-                        cur_df["salinity"] = np.full(len(cur_df), salinity[k], dtype=int)  # add salinity
-                        cur_df["experiment"] = np.full(len(cur_df), P1[i] + " on " + P2[j] + " ; s=" + str(
-                            salinity[k]))  # add salinity
-
-                        # make sure the dataframe is well sorted
-                        cur_df = cur_df.sort_values(["particle", "frame"])
-                        cur_df.index = range(len(cur_df))
-                        if threshold <= 1000:
-                            cur_df = breakLongTrajectory(cur_df, threshold)
-                        N_particles = renameParticleID(cur_df, offset)
-                        offset = offset + N_particles
-
-                        if "df" not in locals():
-                            df = cur_df
-                        else:
-                            df = df.append(cur_df, "ignore_index")  # add new df on top of existing df
-
+                    df = df.append(cur_df, "ignore_index")  # add new df on top of existing df
     return df
 
 
@@ -95,19 +99,6 @@ def setInitFrame(df):
     return df
 
 
-def addTime(df, fps):
-    # Add time column
-    columns = df.columns
-    if len(np.argwhere(columns == "t")) == 0:  # no time column yet
-        df["t"] = df["frame"].div(fps)
-        # reorder columns
-        frame_ind = int(np.argwhere(columns == "frame")) + 1
-        columns_new = np.append(columns[np.arange(frame_ind)], "t")
-        columns_new = np.append(columns_new, columns[frame_ind + np.arange(len(columns) - frame_ind)])
-        df = df[columns_new]
-    return df
-
-
 def addDisplacement(df, ax):
     # ax = "x" or "y" or "t"
     # Add time column
@@ -124,18 +115,33 @@ def addDisplacement(df, ax):
     return df
 
 
-def removeImmobileParticle(df, t_record, cutoff_dist, excluded_experiments=[]):
+def removeImmobileParticle(df, imaging_params_path):
     # t_record in sec, cutoff_dist in micrometers
+    try:
+        parameters_table = pd.read_csv(imaging_params_path)
+    except:
+        return df
+
+    allowed_experiments = parameters_table[parameters_table.Remove_Immobile].experiment.values
+    t_record_list = parameters_table[parameters_table.Remove_Immobile].Remove_Immobile_t_record.values
+    cutoff_dist_list = parameters_table[parameters_table.Remove_Immobile].Remove_Immobile_cutoff_dist.values
+
     D = df.copy()[["experiment", "particle", "t", "x", "y"]]
     D.loc[:, "keepIndex"] = True
     particles = D.particle.unique()
     # this is not really msd but just (r(t)-r(0))^2
     # D['MSD'] = (D['x'] - D.groupby('particle')['x'].transform('first')).pow(2) + (
     #         D['y'] - D.groupby('particle')['y'].transform('first')).pow(2)
-    G = D.groupby("particle")
-    for particle_id in particles:
-        particle_df = G.get_group(particle_id)
-        if particle_df["experiment"].unique() not in excluded_experiments:
+    gb_exp = df.groupby("experiment")
+    for n_iter, experiment in enumerate(allowed_experiments):
+        df_exp = gb_exp.get_group(experiment)
+        particles = df_exp.particle.unique()
+        G = df_exp.groupby("particle")
+        for particle_id in particles:
+            particle_df = G.get_group(particle_id)
+            t_record = t_record_list[n_iter]
+            cutoff_dist = cutoff_dist_list[n_iter]
+
             particle_df_trimmed = particle_df[particle_df["t"] <= t_record]
             x = particle_df_trimmed.x.values
             y = particle_df_trimmed.y.values
@@ -149,13 +155,24 @@ def removeImmobileParticle(df, t_record, cutoff_dist, excluded_experiments=[]):
 
 def addTrajDuration(df):  # in frames
     df = df.copy()
-    df["trajDuration"] = 0
-    particles = df.particle.unique()
+    df["trajDuration"] = 0.
+    df["trajDurationSec"] = 0.
     len_array = df.groupby("particle").apply(len)
-    gb = df.groupby("particle")
-    for particle_id in particles:
-        ind = gb.get_group(particle_id).index
-        df.loc[ind, "trajDuration"] = len_array[particle_id]
+    len_dict = len_array.to_dict()
+    # groupby experiment to avoid memory issues
+    experiments = df["experiment"].unique()
+    gb_exp = df.groupby("experiment")
+    for n, experiment in enumerate(experiments):
+        df_exp = gb_exp.get_group(experiment)
+        len_df_exp = len(df_exp)
+        indices = df_exp.index
+        particles = df_exp["particle"].values
+        fps = df_exp.head(1).fps.values[0]
+        trajDuration = vec_translate(particles, len_dict)  # use basic vectorized dictionary function
+        trajDurationSec = trajDuration / fps
+        df.loc[df_exp.index, "trajDuration"] = trajDuration
+        df.loc[df_exp.index, "trajDurationSec"] = trajDurationSec
+
     return df
 
 
@@ -184,9 +201,8 @@ def assignParticleTrajState(df_particle, T_stick, T_unstick, D, A, baseLen=64.):
     return [df.index, df.state.values, df.logL_states.values]
 
 
-def assignAllTrajStates(df_in, baseLen=64., isPar=False):
-    file_dir = os.getcwd() + "/Trajectories/" + "model_parameters_table.csv"
-    parameters_table = pd.read_csv(file_dir)
+def assignAllTrajStates(df_in, params_path, baseLen=64., isPar=False):
+    parameters_table = pd.read_csv(params_path)
 
     df = df_in.copy()
     all_experiments = df.experiment.unique()
@@ -195,7 +211,7 @@ def assignAllTrajStates(df_in, baseLen=64., isPar=False):
     df["logL_states"] = 0.
     gb_exp = df.groupby("experiment")
 
-    for exp_id,experiment in enumerate(all_experiments):
+    for exp_id, experiment in enumerate(all_experiments):
         cur_params = parameters_table[parameters_table.experiment == experiment]
         # obviously not elegant
         T_stick = cur_params.T_stick.values[0]
@@ -214,68 +230,203 @@ def assignAllTrajStates(df_in, baseLen=64., isPar=False):
                                            ):
                     df.loc[output[0], "state"] = output[1]
                     df.loc[output[0], "logL_states"] = output[2]
-                    print("Assigned states to particle " + str(j) + " of " + str(N_particles) + " ; Experiment "+str(exp_id)+"/"+str(N_experiments))
+                    print("Assigned states to particle " + str(j) + " of " + str(N_particles) + " ; Experiment " + str(
+                        exp_id) + "/" + str(N_experiments))
         else:
             for j, particle in enumerate(particles):
                 output = assignParticleTrajState(all_particle_df[j], T_stick, T_unstick, D, A, baseLen=baseLen)
                 df.loc[output[0], "state"] = output[1]
                 df.loc[output[0], "logL_states"] = output[2]
-                print("Assigned states to particle " + str(j) + " of " + str(N_particles) + " ; Experiment "+str(exp_id)+"/"+str(N_experiments))
+                print("Assigned states to particle " + str(j) + " of " + str(N_particles) + " ; Experiment " + str(
+                    exp_id) + "/" + str(N_experiments))
 
         print("Assigned states to experiment " + experiment)
 
     return df
 
 
-def importAll(threshold=1000000, isPar=False):
-    default_file_name = "mydata.fea"
-    if os.path.isfile(os.getcwd() + "/" + default_file_name):
-        df = pd.read_feather(os.getcwd() + "/" + default_file_name)
+def get_missingFrames(particle_df):
+    frames = particle_df.frame.values
+    min_frame = np.min(frames)
+    max_frame = np.max(frames)
+    missingFrames = np.where(~np.isin(np.arange(min_frame, max_frame), frames))[0]
+    N_missing_frames = len(missingFrames)
+    missingFrames_df = pd.DataFrame([])
+    if N_missing_frames > 0:
+        base_df = particle_df.head(1).copy()
+        base_df["x"] = np.nan
+        base_df["y"] = np.nan
+        base_df["t"] = np.nan
+        base_df["mass"] = np.nan
+        base_df["isNotPad"] = False
+        missingFrames_df = base_df.loc[base_df.index.repeat(N_missing_frames)]
+        missingFrames_df.index = np.arange(N_missing_frames)
+        missingFrames_df.loc[:, "frame"] = missingFrames
+
+    return missingFrames_df
+
+
+def addPadding(df, isPar=False):
+    df = df.copy()
+    df["isNotPad"] = True
+    particles = df.particle.unique()
+    gb = df.groupby("particle")
+    all_particle_df = [gb.get_group(i) for i in particles]
+    missingFrame_df_array = [pd.DataFrame([]) for i in particles]
+
+    if isPar:
+        with ProcessPoolExecutor() as executor:
+            for j, output in enumerate(executor.map(get_missingFrames, all_particle_df)):
+                missingFrame_df_array[j] = output
+                #print("Padded particle " + str(j))
     else:
-        fps = 50.
-        P1 = ["G", "K", "R", "L"]
-        P2 = ["G", "K", "W", "B"]
-        # P1 = ["Z"]
-        # P2 = ["Z"]
-        salinity = range(161)
-        # salinity = [0, 60, 110, 160]
-        df = readFromCSV(P1, P2, salinity, threshold)
-        df = postProcessing(df, fps, isPar=isPar)
-        saveData(df, default_file_name, 0)
+        for j, particle in enumerate(particles):
+            output = get_missingFrames(all_particle_df[j])
+            missingFrame_df_array[j] = output
+            #print("Padded particle " + str(j))
+
+    df_to_append = pd.concat(missingFrame_df_array, ignore_index=True)
+    df_to_append.index = df_to_append.index + df.index.max() + 1
+    df = df.append(df_to_append)
+    df = df.sort_values(["particle", "frame"])
+    df = df.reset_index(drop=True)
     return df
 
 
-def saveData(df, name, mode):
-    # Save data in feather format, TBD other formats + save data with date/time etc.
-    save_path = os.getcwd() + "/" + name
-    df.to_feather(save_path)
+# def addPadding(df):
+#     df = df.copy()
+#     df["isNotPad"] = True
+#     particles = df.particle.unique()
+#     gb = df.groupby("particle")
+#     max_index = df.index.max() + 1
+#     offset = 0
+#     for particle in particles:
+#         particle_df = gb.get_group(particle)
+#         frames = particle_df.frame.values
+#         min_frame = np.min(frames)
+#         max_frame = np.max(frames)
+#         missingFrames = np.where(~np.isin(np.arange(min_frame, max_frame), frames))[0]
+#         N_missing_frames = len(missingFrames)
+#         if N_missing_frames > 0:
+#             base_df = particle_df.head(1).copy()
+#             base_df["x"] = np.nan
+#             base_df["y"] = np.nan
+#             base_df["t"] = np.nan
+#             base_df["mass"] = np.nan
+#             base_df["isNotPad"] = False
+#             df_to_add = base_df.loc[base_df.index.repeat(N_missing_frames)]
+#             df_to_add.index = max_index + offset + np.arange(N_missing_frames)
+#             df_to_add.loc[:, "frame"] = missingFrames
+#             offset = offset + N_missing_frames
+#             df = df.append(df_to_add)
+#
+#     df = df.sort_values(["particle", "frame"])
+#     df = df.reset_index(drop=True)
+#     return df
 
 
-def postProcessing(df, fps, isPar=False):
-    df.loc[df["experiment"] == "R on W ; s=0", "experiment"] = "RW"  # rename
-    df.loc[df["experiment"] == "L on B ; s=0", "experiment"] = "Lab"  # rename
+def importAll(getLatest=True, threshold=1000000, assignTrajStates=False, isPar=False, returnPadded=True):
+    df_list = glob.glob(DATA_DIR + "\\df*.fea")
+    padded_df_list = glob.glob(DATA_DIR + "\\padded*.fea")
+    if (len(df_list) == 0 or not getLatest) or (len(padded_df_list) == 0 and returnPadded):
+        timestamp_str = extras.nowString()
+        print("Importing and processing from scratch: timestamp is " + timestamp_str)
+        df_path = DATA_DIR + "\\df" + "_" + timestamp_str + ".fea"
+        padded_df_path = DATA_DIR + "\\padded_df" + "_" + timestamp_str + ".fea"
+
+        df = readFromCSV(TRAJECTORIES_DIR, threshold)
+        df = postProcessing(df, IMAGING_PARAMETERS_PATH)
+
+        if assignTrajStates:
+            df = assignAllTrajStates(df, params_path=MODEL_PARAMETERS_PATH, baseLen=64.,
+                                     isPar=isPar)  # this is not put into post processing
+        elif "state" not in df.columns:
+            df["state"] = 0.
+
+        df.to_feather(df_path)
+        if returnPadded:
+            padded_df = addPadding(df, isPar)
+            padded_df.to_feather(padded_df_path)
+    else:
+        df_list = glob.glob(DATA_DIR + "\\df*.fea")
+        padded_df_list = glob.glob(DATA_DIR + "\\padded*.fea")
+        df_path = max(df_list, key=os.path.getctime)
+        df = pd.read_feather(df_path)
+        print("Dataframe read from " + df_path)
+        if returnPadded:
+            padded_df_path = max(padded_df_list, key=os.path.getctime)
+            padded_df = pd.read_feather(padded_df_path)
+            print("Padded dataframe read from " + padded_df_path)
+
+    if returnPadded:
+        return df, padded_df
+    else:
+        return df
+
+
+def generateDiffs(df, t_column_name="frame"):
+    particles = df.particle.unique()
+    gb = df.groupby("particle")
+    for particle_id in particles:
+        df_particle = gb.get_group(particle_id)
+        t = df_particle[t_column_name].values
+        diffs_mat = np.triu(
+            scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(t[:, None], 'cityblock')))
+
+
+def scaleUnits(df_in, imaging_params_path):
+    df = df_in.copy()
+
+    # Add time column
+    columns = df.columns
+    df["t"] = 0.
+    # reorder columns
+    frame_ind = int(np.argwhere(columns == "frame")) + 1
+    columns_new = np.append(columns[np.arange(frame_ind)], "t")
+    columns_new = np.append(columns_new, columns[frame_ind + np.arange(len(columns) - frame_ind)])
+    df = df[columns_new]
+
+    # Also add fps column
+    df["fps"] = 1.  # default
+
+    all_experiments = df.experiment.unique()
+    N_experiments = len(all_experiments)
+
+    try:
+        parameters_table = pd.read_csv(imaging_params_path)
+    except:
+        return df
+
+    for exp_id, experiment in enumerate(all_experiments):
+        if experiment in parameters_table.experiment.values:
+            cur_params = parameters_table[parameters_table.experiment == experiment]
+            # obviously not elegant
+            fps = cur_params.fps.values[0]
+            micron2pix = cur_params.micron2pix.values[0]
+            # Scale x,y
+            exp_index = df["experiment"] == experiment
+            df.loc[exp_index, "x"] = df.loc[exp_index, "x"].mul(micron2pix)
+            df.loc[exp_index, "y"] = df.loc[exp_index, "y"].mul(micron2pix)
+            df.loc[exp_index, "t"] = df.loc[exp_index, "frame"].div(fps)
+            df.loc[exp_index, "fps"] = fps
+    return df
+
+
+def postProcessing(df, imaging_params_path="None"):
     df = setInitFrame(df)
-    df = addTime(df, fps)
-
-    df.loc[df["peptides"] != "R on W", "x"] = df.loc[df["peptides"] != "R on W", "x"].mul(
-        0.29)  # rescale pix to microns
-    df.loc[df["peptides"] != "R on W", "y"] = df.loc[df["peptides"] != "R on W", "y"].mul(
-        0.29)  # rescale pix to microns
-
-    df.loc[df["experiment"] == "Lab", "t"] = df.loc[df["experiment"] == "Lab", "t"].mul(fps / 20.)  # rescale time
-    df.loc[df["experiment"] == "Lab", "x"] = df.loc[df["experiment"] == "Lab", "x"].mul(
-        10 / 85 / 0.29)  # rescale pix to microns
-    df.loc[df["experiment"] == "Lab", "y"] = df.loc[df["experiment"] == "Lab", "y"].mul(
-        10 / 85 / 0.29)  # rescale pix to microns
-    df = removeImmobileParticle(df, t_record=0.4, cutoff_dist=1.2 * 0.29,
-                                excluded_experiments=["RW", "Lab"])  # numbers from Indrani paper
+    df = scaleUnits(df, imaging_params_path)
+    df = removeImmobileParticle(df, imaging_params_path)  # numbers from Indrani paper
     df = addDisplacement(df, "x")
     df = addDisplacement(df, "y")
     df = addDisplacement(df, "t")  # must for bayesianTools
 
     df = addTrajDuration(df)
+
     df["dr2"] = df["dx"].pow(2) + df["dy"].pow(2)  # must for bayesianTools
 
-    df = assignAllTrajStates(df, baseLen=64., isPar=isPar)
-
     return df
+
+
+def vec_translate(a, my_dict):
+    # From https://stackoverflow.com/questions/16992713/translate-every-element-in-numpy-array-according-to-key
+    return np.vectorize(my_dict.__getitem__)(a)

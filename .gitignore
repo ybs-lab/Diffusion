@@ -1,6 +1,8 @@
 .idea/
-files/
-images_to_vid/
-*.fea
+Data/
+Outputs/files/
+Outputs/img4vid/
+Trajectories/
+Resources/Parameters/
 __pycache__/
 .ipynb_checkpoints/

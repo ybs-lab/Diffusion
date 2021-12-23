@@ -100,12 +100,10 @@ def generateDiffuseTetherModel(T_stick, T_unstick, D, A, dt=0.02, T_end=2.0, N_p
             os.mkdir(filepath)
         df.to_csv(path_or_buf=filepath + "/experimentCSV_" + str(len(os.listdir(filepath))) + ".csv")
 
-    df["peptides"] = "R on W"
-    df["salinity"] = salinity_index
     if experiment_name != []:
         df["experiment"] = experiment_name
     else:
-        df["experiment"] = "R on W ; s=" + str(salinity_index)
-    df = postProcessing(df, fps=1. / dt)
+        df["experiment"] = "synthetic"
+    df = postProcessing(df)
 
     return df

@@ -3,85 +3,142 @@ import numpy as np
 import pandas as pd
 import glob
 from concurrent.futures import ProcessPoolExecutor
-from extras import nowString, vec_translate, index_intervals_extract
-from trajAnalysis import calc_rolling_R_gyration, intersecting_neighbors, assignAllTrajStates, \
-    assign_D_n_estimate, calculate_local_D, breakTrajectories_Collisions, smooth_states,undersampleAllParticles,labelAllTrajectories
-from config import TRAJECTORIES_DIR, DATA_DIR, IMAGING_PARAMETERS_PATH, MODEL_PARAMETERS_PATH,PADDING_INTERPOLATION_MAX_FRAMES
+from utils import now_string, vec_translate, index_intervals_extract
+from trajAnalysis import calc_rolling_R_gyration, intersecting_neighbors, assign_D_n_estimate, calculate_local_D, \
+    break_trajectories_collisions, smooth_states, undersample_all_particles
+from config import TRAJECTORIES_DIR, DATA_DIR, IMAGING_PARAMETERS_PATH, MODEL_PARAMETERS_PATH, \
+    PADDING_INTERPOLATION_MAX_FRAMES
+from model import Model
+from model_utils import GenerationMode
 
 
-def importAll(getLatest=True, threshold=1000000, assignTrajStates=False, breakTrajectoryAtCollisions=False,
-              isPar=False):
+def import_all(get_latest=True, assign_traj_states=False, break_trajectory_at_collisions=False,
+               is_parallel=False):
     df_list = glob.glob(DATA_DIR + "/df*.fea")
-    if len(df_list) == 0 or not getLatest:  # read from csv and do post processing (slow)
-        timestamp_str = nowString()
+    if len(df_list) == 0 or not get_latest:  # read from csv and do post processing (slow)
+        timestamp_str = now_string()
         print("Importing and processing from scratch: timestamp is " + timestamp_str)
-        df_path = DATA_DIR + "/df" + "_" + timestamp_str + ".fea"
-        df = readFromCSV(TRAJECTORIES_DIR, threshold)
-        df = postProcessing(df, IMAGING_PARAMETERS_PATH, assignTrajStates=assignTrajStates,undersampleLongTrajectories=True,
-                            breakTrajectoryAtCollisions=breakTrajectoryAtCollisions, isPar=isPar)
+        df_path = os.path.join(DATA_DIR, "df" + "_" + timestamp_str + ".fea")
+        df = read_from_csv(TRAJECTORIES_DIR)
+        df = post_processing(df, IMAGING_PARAMETERS_PATH, assign_traj_states=assign_traj_states,
+                             undersampleLongTrajectories=True,
+                             break_trajectory_at_collisions=break_trajectory_at_collisions, is_parallel=is_parallel)
         df.to_feather(df_path)
     else:  # read from feather (fast)
-        df_list = glob.glob(DATA_DIR + "/df*.fea")
+        df_list = glob.glob(os.path.join(DATA_DIR, "/df*.fea"))
         df_path = max(df_list, key=os.path.getctime)
         df = pd.read_feather(df_path)
         print("Dataframe read from " + df_path.replace('\\', '/'))
     return df
 
 
-def postProcessing(df, imaging_params_path=IMAGING_PARAMETERS_PATH, assignTrajStates=False,
-                   breakTrajectoryAtCollisions=False, undersampleLongTrajectories=True, isPar=False):
+def post_processing(df, imaging_params_path=IMAGING_PARAMETERS_PATH, assign_traj_states=False,
+                    break_trajectory_at_collisions=False, undersampleLongTrajectories=True, is_parallel=False):
     print("Beginning post-processing of the dataframe...")
     # 1. Padding and interpolating missing frames
-    df = addPadding(df, isPar=isPar)
-    df = interpolatePadding(df, isPar=isPar)
+    df = add_padding(df, is_parallel=is_parallel)
+    df = interpolate_padding(df, is_parallel=is_parallel)
 
     # 2. Scale units (fps and micron2pix)
-    df = scaleUnits(df, imaging_params_path)
+    df = scale_units(df, imaging_params_path)
 
     # # 3. Handle neighbors (not for synthetic data or 1 particle trajectories)
-    df = intersecting_neighbors(df,isPar=isPar)
+    df = intersecting_neighbors(df, is_parallel=is_parallel)
     if ~((len(df.particle.unique()) == 1) | (df.experiment.unique()[0].lower() == "synthetic")):
-        if breakTrajectoryAtCollisions:
-            split_df_array = breakTrajectories_Collisions(df, isPar=isPar)
-            df = splitParticleTrajectories(split_df_array)
+        if break_trajectory_at_collisions:
+            split_df_array = break_trajectories_collisions(df, is_parallel=is_parallel)
+            df = split_particle_trajectories(split_df_array)
 
-    #4. Undersample long trajectories
+    # 4. Undersample long trajectories
     if undersampleLongTrajectories:
-        df = undersampleAllParticles(df,isPar=isPar)
+        df = undersample_all_particles(df, is_parallel=is_parallel)
 
     # 5. Add useful and simple information:
-    df = setInitFrame(df)
-    df = labelImmobileParticle(df, imaging_params_path)  # this is for totally stuck particles
-    df = addDisplacement(df, "x")
-    df = addDisplacement(df, "y")
-    df = addDisplacement(df, "t")  # must for bayesianTools
-    df = addTrajDuration(df)
+    df = set_init_frame(df)
+    df = label_immobile_particle(df, imaging_params_path)  # this is for totally stuck particles
+    df = add_displacement(df, "x")
+    df = add_displacement(df, "y")
+    df = add_displacement(df, "t")  # must for bayesianTools
+    df = add_traj_duration(df)
     df["dr2"] = df["dx"].pow(2) + df["dy"].pow(2)  # must for bayesianTools
 
     # 6. Add more advanced statistics
-    df = calc_rolling_R_gyration(df, isPar=isPar)
+    df = calc_rolling_R_gyration(df, is_parallel=is_parallel)
 
-    if assignTrajStates:  # This is the long bayesian things
-        # df = assignAllTrajStates(df, params_path=MODEL_PARAMETERS_PATH, baseLen=64.,
-        #                          isPar=isPar)
-
-        df_path = DATA_DIR + "/df_TEMP_BEFORE_LABELING.fea"
-        df.to_feather(df_path)
-        df = labelAllTrajectories(df,isPar=isPar)
-        df = smooth_states(df, isPar=isPar)
+    if assign_traj_states:  # This is the long bayesian stuff
+        pass
+        # df = labelAllTrajectories(df, is_parallel=is_parallel)
+        # df = smooth_states(df, is_parallel=is_parallel)
     elif "state" not in df.columns:
-        df["state"] = 0.
+        df["state"] = 0
 
-    df = assign_D_n_estimate(df, isPar=isPar)
-    df = calculate_local_D(df, T=30, isPar=isPar)
-    df = calculate_local_D(df, T=90, isPar=isPar)
-    df = calculate_local_D(df, T=150, isPar=isPar)
+    df = assign_D_n_estimate(df, is_parallel=is_parallel)
+    df = calculate_local_D(df, T=30, is_parallel=is_parallel)
+    df = calculate_local_D(df, T=90, is_parallel=is_parallel)
+    df = calculate_local_D(df, T=150, is_parallel=is_parallel)
 
     print("Done with post-processing!")
     return df
 
 
-def readFromCSV(traj_path, threshold=1000000):
+def generate_diffuse_tether_trajectories(T_stick, T_unstick, D, A, N_steps=1024, dt=1. / 30., N_particle=4, init_S=0,
+                                         undersample_ratio=0, save_files=False,
+                                         generation_mode=GenerationMode.DONT_FORCE,
+                                         is_parallel=False):
+    """
+    Generate a trajectory (see Model class) and wrap it as a dataframe
+
+    """
+    model = Model(T_stick, T_unstick, D, A, dt)
+    states_arr, X_arr, X_tether_arr = model.generate_trajectories(N_steps, N_particle, init_S, generation_mode)
+
+    # Here model ends and it's just pandas stuff
+    frame = np.tile(np.arange(N_steps, dtype=int), [N_particle, 1]).flatten()
+    particle = np.tile(np.arange(N_particle, dtype=int), [N_steps, 1]).T.flatten()
+    x = X_arr[:, :, 0].flatten()
+    y = X_arr[:, :, 1].flatten()
+    state = states_arr.flatten().astype(int)
+    x_tether = X_tether_arr[:, :, 0].flatten()
+    y_tether = X_tether_arr[:, :, 1].flatten()
+    mass = 0. * frame
+    df = pd.DataFrame.from_dict({
+        'frame': frame,
+        'particle': particle,
+        'x': x,
+        'y': y,
+        'mass': mass,
+        'state': state,
+        'x_tether': x_tether,
+        'y_tether': y_tether,
+    })
+
+    # TBD FIX THIS TO SOMETHING PER PARTICLE
+    N_samp = N_particle * N_steps
+    N_samples_to_discard = int(np.floor(N_samp * undersample_ratio))
+    random_index = np.random.choice(range(N_samp), N_samples_to_discard, replace=False)
+    mask_array = np.ones(N_samp, dtype=bool)
+    mask_array[random_index] = False
+    df = df[mask_array].reset_index()
+
+    timestamp_str = now_string()
+    df["experiment"] = "synthetic"
+    df["filename"] = "synth_" + timestamp_str
+    df["file_particle_id"] = df["particle"]
+    df["video_frame"] = df["frame"]
+    df = post_processing(df, is_parallel=is_parallel, assign_traj_states=False, break_trajectory_at_collisions=False,
+                         undersampleLongTrajectories=False)
+
+    if save_files:
+        # save now
+        filepath = "./Trajectories/Synthetic/"
+        if not os.path.isdir(filepath):
+            os.mkdir(filepath)
+        df.to_csv(path_or_buf=os.path.join(filepath, "synth_" + timestamp_str + ".csv"))
+
+    return df
+
+
+def read_from_csv(traj_path):
     # Return a pandas dataframe with all the experimental data found in input path.
     # In directory traj_path, each different folder is considered a different experiment
     # threshold is related to breaking of long trajectories, not recommended to use!
@@ -113,13 +170,11 @@ def readFromCSV(traj_path, threshold=1000000):
                 cur_df["particle"] = cur_df["particle"].astype('int')  # convert to int
                 cur_df["experiment"] = experiment
                 cur_df["filename"] = file
-                cur_df["video_frame"] = cur_df["frame"] #this is important for later
+                cur_df["video_frame"] = cur_df["frame"]  # this is important for later
                 # make sure the dataframe is well sorted
                 cur_df = cur_df.sort_values(["particle", "frame"])
                 cur_df.index = range(len(cur_df))
-                if threshold <= 1000:
-                    cur_df = breakLongTrajectory(cur_df, threshold)
-                N_particles = renameParticleID(cur_df, offset)
+                N_particles = rename_particle_id(cur_df, offset)
                 offset = offset + N_particles
                 if "df" not in locals():
                     df = cur_df
@@ -128,7 +183,7 @@ def readFromCSV(traj_path, threshold=1000000):
     return df
 
 
-def renameParticleID(df, offset):
+def rename_particle_id(df, offset):
     # Rename particle IDs because different files might have the same particle ID (but the particles are different)
     # This alters the input dataframe!
     particleIDs = pd.unique(df.particle)
@@ -139,38 +194,14 @@ def renameParticleID(df, offset):
     return Nparticles
 
 
-def breakLongTrajectory(df, threshold):
-    particles = df.particle.unique()
-    columns_index = np.where(df.columns == "particle")[0][0]
-    N_particles = -1
-    for j, particle_id in enumerate(particles):
-        df_particle = df[df["particle"] == particle_id]
-        if len(df_particle) > 2 * threshold:
-            break_indices = np.arange(len(df_particle), step=threshold)
-            break_indices[-1] = len(df_particle)
-            break_indices = break_indices + df_particle.index[0]
-            for i in range(len(break_indices) - 1):
-                df_particle.at[break_indices[i]:break_indices[i + 1], "particle"] = N_particles + 1
-                N_particles = N_particles + 1
-        else:
-            df_particle.at[:, "particle"] = N_particles + 1
-            N_particles = N_particles + 1
-        if j == 0:
-            df_out = df_particle
-        else:
-            df_out = df_out.append(df_particle, "ignore_index")
-
-    return df_out
-
-
-def setInitFrame(df):
+def set_init_frame(df):
     # Make sure the initial frame of each particle is 0
     df['init_frame'] = df.groupby('particle')['frame'].transform('first')
     df['frame'] = df['frame'] - df['init_frame']
     return df
 
 
-def addDisplacement(df, ax):
+def add_displacement(df, ax):
     # ax = "x" or "y" or "t"
     # Add time column
     columns = df.columns
@@ -188,7 +219,7 @@ def addDisplacement(df, ax):
     return df
 
 
-def labelImmobileParticle(df, imaging_params_path):
+def label_immobile_particle(df, imaging_params_path):
     # t_record in sec, cutoff_dist in micrometers
     df["isMobile"] = True
     try:
@@ -245,7 +276,7 @@ def labelImmobileParticle(df, imaging_params_path):
     return df
 
 
-def addTrajDuration(df):  # in frames
+def add_traj_duration(df):  # in frames
     df = df.copy()
     df["trajDuration"] = 0.
     df["trajDurationSec"] = 0.
@@ -263,14 +294,14 @@ def addTrajDuration(df):  # in frames
         indices = df_exp.index
         particles = df_exp["particle"].values
         trajDuration = vec_translate(particles, len_dict)  # use basic vectorized dictionary function
-        trajDurationSec = trajDuration / vec_translate(particles,fps_dict)
+        trajDurationSec = trajDuration / vec_translate(particles, fps_dict)
         df.loc[df_exp.index, "trajDuration"] = trajDuration
         df.loc[df_exp.index, "trajDurationSec"] = trajDurationSec
 
     return df
 
 
-def get_missingFrames(particle_df):
+def get_missing_frames(particle_df):
     frames = particle_df.frame.values
     min_frame = np.min(frames)
     max_frame = np.max(frames)
@@ -292,7 +323,7 @@ def get_missingFrames(particle_df):
     return missingFrames_df
 
 
-def addPadding(df, isPar=False):
+def add_padding(df, is_parallel=False):
     df = df.copy()
     df["isNotPad"] = True
     particles = df.particle.unique()
@@ -301,14 +332,14 @@ def addPadding(df, isPar=False):
     missingFrame_df_array = [pd.DataFrame([]) for i in particles]
 
     print("Padding the dataframe...")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor() as executor:
-            for j, output in enumerate(executor.map(get_missingFrames, all_particle_df)):
+            for j, output in enumerate(executor.map(get_missing_frames, all_particle_df)):
                 missingFrame_df_array[j] = output
                 # print("Padded particle " + str(j) + " (Parallel)")
     else:
         for j, particle in enumerate(particles):
-            output = get_missingFrames(all_particle_df[j])
+            output = get_missing_frames(all_particle_df[j])
             missingFrame_df_array[j] = output
             # print("Padded particle " + str(j))
 
@@ -320,7 +351,7 @@ def addPadding(df, isPar=False):
     return df
 
 
-def interpolate_missingFrames(particle_df, nan_threshold=PADDING_INTERPOLATION_MAX_FRAMES):
+def interpolate_missing_frames(particle_df, nan_threshold=PADDING_INTERPOLATION_MAX_FRAMES):
     particle_df = particle_df.copy()
     padding_segments = list(index_intervals_extract(particle_df.index[~particle_df.isNotPad]))
     first_index = particle_df.index[0]
@@ -340,7 +371,7 @@ def interpolate_missingFrames(particle_df, nan_threshold=PADDING_INTERPOLATION_M
     return particle_df
 
 
-def interpolatePadding(df, isPar=False):
+def interpolate_padding(df, is_parallel=False):
     df = df.copy()
     particles = df.particle.unique()
     gb = df.groupby("particle")
@@ -348,14 +379,14 @@ def interpolatePadding(df, isPar=False):
     interpolated_df_array = [pd.DataFrame([]) for i in particles]
 
     print("Interpolating the dataframe's padding...")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor() as executor:
-            for j, output in enumerate(executor.map(interpolate_missingFrames, all_particle_df)):
+            for j, output in enumerate(executor.map(interpolate_missing_frames, all_particle_df)):
                 interpolated_df_array[j] = output
                 # print("Interpolated padding for particle " + str(j) + " (Parallel)")
     else:
         for j, particle in enumerate(particles):
-            output = interpolate_missingFrames(all_particle_df[j])
+            output = interpolate_missing_frames(all_particle_df[j])
             interpolated_df_array[j] = output
             # print("Interpolated padding for particle " + str(j))
 
@@ -364,7 +395,7 @@ def interpolatePadding(df, isPar=False):
     return df
 
 
-def scaleUnits(df_in, imaging_params_path):
+def scale_units(df_in, imaging_params_path):
     default_fps = 30.
     default_micron2pix = 0.097
 
@@ -414,7 +445,7 @@ def scaleUnits(df_in, imaging_params_path):
     return df
 
 
-def splitParticleTrajectories(split_particle_df_array):
+def split_particle_trajectories(split_particle_df_array):
     count = 0
     splitted_df_array = np.empty(len(split_particle_df_array), dtype=object)
     for i, split_df_array in enumerate(split_particle_df_array):
@@ -425,5 +456,3 @@ def splitParticleTrajectories(split_particle_df_array):
             splitted_df_array[i] = pd.concat(split_df_array)
     df = pd.concat(splitted_df_array).reset_index(drop=True)
     return df
-
-

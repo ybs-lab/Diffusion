@@ -1,17 +1,17 @@
 import os
-
+#Figure out which one of the two...
 import cv2.cv2
+import cv2
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import imageio
-import cv2
 import argparse
 import scipy.spatial
 import scipy.optimize
-from extras import backupBeforeSave, isnotebook
-from trajAnalysis import getDiffs, shiftTrajToOrigin
+from utils import backup_before_save, isnotebook
+from trajAnalysis import get_diffs, shift_traj_to_origin
 from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, BoundaryNorm
 
@@ -31,7 +31,7 @@ def plot_MSD(df, lagtime=np.arange(1, 1000, step=5), group_by="experiment", logs
         for j, key in enumerate(group_keys):
             particle_df = gb.get_group(key)  # could be experiment df as well
             fps = particle_df.head(1).fps.values[0]
-            out = getDiffs(particle_df, dt, is_df_padded=isdfPadded)
+            out = get_diffs(particle_df, dt, is_df_padded=isdfPadded)
             dx = out[0]
             dy = out[1]
             particle = out[2]
@@ -93,7 +93,7 @@ def plot_MSD(df, lagtime=np.arange(1, 1000, step=5), group_by="experiment", logs
 
     if saveFiles:
         filepath = os.path.join(OUTPUTS_DIR, filename + ".png")
-        backupBeforeSave(filepath)
+        backup_before_save(filepath)
         plt.savefig(filepath, format="png", dpi=400)
     return MSD_df
 
@@ -136,7 +136,7 @@ def plot_G_dx_dt(df, direction="xy", group_by="experiment", dt=1, kind="kde", fi
     gb = df.groupby(group_by)
     G = pd.DataFrame([])
     for j, key in enumerate(group_keys):
-        out = getDiffs(gb.get_group(key), dt, is_df_padded=isdfPadded)
+        out = get_diffs(gb.get_group(key), dt, is_df_padded=isdfPadded)
         dx = out[0]
         dy = out[1]
         # particle = out[2]
@@ -197,7 +197,7 @@ def plot_G_dx_dt(df, direction="xy", group_by="experiment", dt=1, kind="kde", fi
         return kp, stats_df
 
 
-def plotTrajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarker=False,
+def plot_trajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarker=False,
                      startAtOrigin=False, dispLegend=False, useDrawnLines=False, drawnLines=[], hideLines=False,
                      alpha=1., curParticlePivotSize=0., multiColorLine=True, axForVelocityPlot=[],
                      particlesForFixedColoring=[],
@@ -246,7 +246,7 @@ def plotTrajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarker
     df = df[(df.frame >= t_st) & (df.frame <= t_end)]  # filter by time
 
     if startAtOrigin:  # for each particle, subtract x[0] and y[0] so the traj starts at the origin
-        df = shiftTrajToOrigin(df)
+        df = shift_traj_to_origin(df)
 
     if len(particlesForFixedColoring) > 0:
         particle_list = particlesForFixedColoring
@@ -471,8 +471,8 @@ def plotTrajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarker
     return [line_array, lc_array, scatter_array, vel_line_array, vel_lc_array, vel_scatter_array, pivot_line_array]
 
 
-def createGif(path='.', buffer=5, output_name="mygif", image_type="png"):
-    # createGif creates a gif file in the local folder from images in a folder according to their alphabetical order
+def create_gif(path='.', buffer=5, output_name="mygif", image_type="png"):
+    # create_gif creates a gif file in the local folder from images in a folder according to their alphabetical order
     # IMPORTANT NOTE 1: images names should have preceding zeros, e.g. 10 follows 1 and precedes 2 so use 01, 02,...,10
     # Note 2: if a gif with the existing name exists, it will be copied with a time suffix
     #
@@ -489,7 +489,7 @@ def createGif(path='.', buffer=5, output_name="mygif", image_type="png"):
             images.append(f)
 
     output_full = output_name + '.gif'
-    backupBeforeSave(output_full)
+    backup_before_save(output_full)
 
     with imageio.get_writer(output_name + '.gif', mode='I') as writer:
         for i, filename in enumerate(images):
@@ -505,8 +505,8 @@ def createGif(path='.', buffer=5, output_name="mygif", image_type="png"):
     return
 
 
-def createVideo(path='.', fps=4.0, output_name="myvideo", image_type="png"):
-    # createVideo creates an mp4 file in the local folder from images in a folder according to their alphabetical order
+def create_video(path='.', fps=4.0, output_name="myvideo", image_type="png"):
+    # create_video creates an mp4 file in the local folder from images in a folder according to their alphabetical order
     # IMPORTANT NOTE 1: images names should have preceding zeros, e.g. 10 follows 1 and precedes 2 so use 01, 02,...,10
     # Note 2: if a video with the existing name exists, it will be copied with a time suffix
     # Note 3: this usually doesn't work when called from console
@@ -549,7 +549,7 @@ def createVideo(path='.', fps=4.0, output_name="myvideo", image_type="png"):
     # Define the codec and create VideoWriter object
     fourcc = cv2.VideoWriter_fourcc(*'H264')  # Be sure to use lower case
 
-    backupBeforeSave(output)
+    backup_before_save(output)
 
     # This creates a new file
     out = cv2.VideoWriter(output, fourcc, fps, (width, height))
@@ -572,7 +572,7 @@ def createVideo(path='.', fps=4.0, output_name="myvideo", image_type="png"):
     return
 
 
-def animate_Trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin=True, preStr="traj",
+def animate_trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin=True, preStr="traj",
                          video_name="traj_video", gif_name="traj_gif", showFigure=False, saveFiles=True,
                          dispLegend=False, doneTrajNoMarker=True, fps=0., axForVelocityPlot=[],
                          particlesForFixedColoring=[], curParticlePivotSize=0.):
@@ -581,7 +581,7 @@ def animate_Trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
         fig, ax = plt.subplots(figsize=(6, 6))
     max_frame = t_end_array[-1]
     # first plot the lines, then we only modify them for better runtime
-    drawnLines = plotTrajectories(df, t_end=max_frame, doneTrajNoMarker=doneTrajNoMarker,
+    drawnLines = plot_trajectories(df, t_end=max_frame, doneTrajNoMarker=doneTrajNoMarker,
                                   startAtOrigin=startAtOrigin,
                                   dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[],
                                   hideLines=True, axForVelocityPlot=axForVelocityPlot)
@@ -591,7 +591,7 @@ def animate_Trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
     filenames = []
     for i, t_end in enumerate(t_end_array):
 
-        notebookAnimateTraj(df, ax, t_end, max_frame, startAtOrigin=startAtOrigin, doneTrajNoMarker=doneTrajNoMarker,
+        notebook_animate_traj(df, ax, t_end, max_frame, startAtOrigin=startAtOrigin, doneTrajNoMarker=doneTrajNoMarker,
                             dispLegend=dispLegend, useDrawnLines=True, drawnLines=drawnLines, fps=fps,
                             axForVelocityPlot=axForVelocityPlot, particlesForFixedColoring=particlesForFixedColoring,
                             curParticlePivotSize=curParticlePivotSize)
@@ -606,8 +606,8 @@ def animate_Trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
             plt.savefig(filename, format="png", dpi=400)
 
     if saveFiles:
-        createVideo(path=files_path, fps=20.0, output_name=os.path.join(OUTPUTS_DIR, video_name), image_type="png")
-        createGif(path=files_path, buffer=5, output_name=(OUTPUTS_DIR, gif_name), image_type="png")
+        create_video(path=files_path, fps=20.0, output_name=os.path.join(OUTPUTS_DIR, video_name), image_type="png")
+        create_gif(path=files_path, buffer=5, output_name=(OUTPUTS_DIR, gif_name), image_type="png")
         for f in os.listdir(files_path):
             os.remove(files_path + f)
 
@@ -721,13 +721,13 @@ def animate_G_dx_dt(df, d_array=np.arange(1, 101), group_by="experiment", x="xy"
                 stats_df = stats_df.append(cur_stats_df)
 
     if saveFiles:
-        createVideo(path=files_path, fps=6.0, output_name=os.path.join(OUTPUTS_DIR, video_name), image_type="png")
-        # createGif(path=files_path, buffer=5, output_name="./files/" + gif_name, image_type="png")
+        create_video(path=files_path, fps=6.0, output_name=os.path.join(OUTPUTS_DIR, video_name), image_type="png")
+        # create_gif(path=files_path, buffer=5, output_name="./files/" + gif_name, image_type="png")
         for f in os.listdir(files_path):
             os.remove(files_path + f)
 
         if len(stats_df) > 0:
-            backupBeforeSave(OUTPUTS_DIR + "/stats_df.fea")
+            backup_before_save(OUTPUTS_DIR + "/stats_df.fea")
             stats_df.reset_index().to_feather(OUTPUTS_DIR + "/stats_df.fea")
             stats_df = stats_df.reset_index()
             stats_fig = plt.figure()
@@ -743,12 +743,12 @@ def animate_G_dx_dt(df, d_array=np.arange(1, 101), group_by="experiment", x="xy"
             ax2.set_yscale("log")
             ax1.set_ylabel(rf'$Var(G(\Delta {x},\Delta t)) [\mu m^2]$')
             var_name_full = os.path.join(OUTPUTS_DIR, var_name + ".png")
-            backupBeforeSave(var_name_full)
+            backup_before_save(var_name_full)
             plt.savefig(var_name_full, format="png", dpi=400)
     return
 
 
-def showTrajLengthStats(df):
+def show_traj_length_stats(df):
     for i, exp in enumerate(df.experiment.unique()):
         d = df.groupby("experiment").get_group(exp).groupby("particle").apply(len).to_frame()
         d = d.rename(columns={0: "len"})
@@ -790,7 +790,7 @@ def trajAxesLimits(df, startAtOrigin):
     return xlim, ylim
 
 
-def stateTimesHistogram(df=pd.DataFrame([]), times_df=pd.DataFrame([]), kind="kde", eqWeightParticles=True,
+def state_times_histogram(df=pd.DataFrame([]), times_df=pd.DataFrame([]), kind="kde", eqWeightParticles=True,
                         log_scale=True, ax=[], saveFiles=False):
     if times_df.empty:  # create times_df from the normal input df
         experiments = df.experiment.unique()
@@ -885,13 +885,13 @@ def stateTimesHistogram(df=pd.DataFrame([]), times_df=pd.DataFrame([]), kind="kd
 
     if saveFiles:
         filepath = OUTPUTS_DIR + "/times_df.fea"
-        backupBeforeSave(filepath)
+        backup_before_save(filepath)
         times_df.to_feather(filepath)
 
     return times_df
 
 
-def quickTraj(df, N_particles=1, t_end_array=np.arange(0, 101), ):
+def quick_traj(df, N_particles=1, t_end_array=np.arange(0, 101), ):
     random_particle_id = np.random.choice(df.particle.unique(), size=N_particles, replace=False)
     small_df = df[df["particle"].isin(random_particle_id)]
     ax = plt.gca()
@@ -904,21 +904,21 @@ def quickTraj(df, N_particles=1, t_end_array=np.arange(0, 101), ):
     # ax.set_ylim([0.0001, 1])
     ax.set_yscale("linear")
     ax.set_ylim([0, 1])
-    out = getDiffs(small_df, 1)
+    out = get_diffs(small_df, 1)
     dx = out[0]
     dy = out[1]
     print("Mean dx,dy,dr2 correct: " + str(np.mean(np.abs(dx))) + ", " + str(np.mean(np.abs(dy))) + ", " + str(
         np.mean(dx ** 2 + dy ** 2)))
-    animate_Trajectories(small_df, showFigure=True, t_end_array=np.arange(0, 101),
+    animate_trajectories(small_df, showFigure=True, t_end_array=np.arange(0, 101),
                          saveFiles=False, dispLegend=True)
     plt.show()
 
 
-def notebookAnimateTraj(df, ax, t_end, max_frame, startAtOrigin=True, doneTrajNoMarker=True, dispLegend=False,
+def notebook_animate_traj(df, ax, t_end, max_frame, startAtOrigin=True, doneTrajNoMarker=True, dispLegend=False,
                         useDrawnLines=False, drawnLines=[], fps=0., axForVelocityPlot=[], particlesForFixedColoring=[],
                         curParticlePivotSize=0.):
     # ax.cla()
-    out_graphic_handles = plotTrajectories(df, t_end=t_end, doneTrajNoMarker=doneTrajNoMarker,
+    out_graphic_handles = plot_trajectories(df, t_end=t_end, doneTrajNoMarker=doneTrajNoMarker,
                                            startAtOrigin=startAtOrigin,
                                            dispLegend=False, ax=ax, useDrawnLines=useDrawnLines,
                                            drawnLines=drawnLines, axForVelocityPlot=axForVelocityPlot,
@@ -953,7 +953,7 @@ def notebookAnimateTraj(df, ax, t_end, max_frame, startAtOrigin=True, doneTrajNo
     return out_graphic_handles
 
 
-def addTrajectoriesToImages(df, init_frame=0, last_frame=10000, particles="all", path=IMG4VID_DIR, dpi=100,
+def overlay_trajectories_on_images(df, init_frame=0, last_frame=10000, particles="all", path=IMG4VID_DIR, dpi=100,
                             header="EDITED_", curParticlePivotSize=25., inputType="video", forceFPS=0., alpha=0.2,
                             writeEveryNFrames=1):
     plt.ioff()  # todo: find better solution than this...
@@ -979,7 +979,7 @@ def addTrajectoriesToImages(df, init_frame=0, last_frame=10000, particles="all",
         input = os.path.join(path, filename)
         name, ext = os.path.splitext(filename)
         output = os.path.join(path, header + name + ".avi")
-        backupBeforeSave(output)
+        backup_before_save(output)
 
         fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Be sure to use lower case
         vidcap = cv2.VideoCapture(input)
@@ -988,7 +988,7 @@ def addTrajectoriesToImages(df, init_frame=0, last_frame=10000, particles="all",
         success, image = vidcap.read()
         height, width, channels = image.shape
         if forceFPS == 0:
-            fps = openCVgetfps(vidcap)
+            fps = opencv_get_fps(vidcap)
         else:
             fps = forceFPS
 
@@ -1018,7 +1018,7 @@ def addTrajectoriesToImages(df, init_frame=0, last_frame=10000, particles="all",
                 ax.set_axis_off()
                 fig.add_axes(ax)
                 ax.imshow(image, aspect='auto')
-                plotTrajectories(df, t_st=init_frame, t_end=frame, doneTrajNoMarker=True, startAtOrigin=False,
+                plot_trajectories(df, t_st=init_frame, t_end=frame, doneTrajNoMarker=True, startAtOrigin=False,
                                  dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[], multiColorLine=False,
                                  hideLines=False, axForVelocityPlot=[],
                                  curParticlePivotSize=curParticlePivotSize, particlesForFixedColoring=particles,
@@ -1066,7 +1066,7 @@ def addTrajectoriesToImages(df, init_frame=0, last_frame=10000, particles="all",
                 fig.add_axes(ax)
                 ax.imshow(image, aspect='auto')
 
-                plotTrajectories(df, t_st=init_frame, t_end=cur_frame, doneTrajNoMarker=True, startAtOrigin=False,
+                plot_trajectories(df, t_st=init_frame, t_end=cur_frame, doneTrajNoMarker=True, startAtOrigin=False,
                                  dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[], multiColorLine=False,
                                  hideLines=False, axForVelocityPlot=[],
                                  curParticlePivotSize=curParticlePivotSize, particlesForFixedColoring=particles)
@@ -1078,7 +1078,7 @@ def addTrajectoriesToImages(df, init_frame=0, last_frame=10000, particles="all",
     plt.ion()  # todo: find better solution than this...
 
 
-def openCVgetfps(vidcap):
+def opencv_get_fps(vidcap):
     # Find OpenCV version
     (major_ver, minor_ver, subminor_ver) = (cv2.__version__).split('.')
     if int(major_ver) < 3:

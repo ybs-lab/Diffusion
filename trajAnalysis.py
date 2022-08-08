@@ -2,17 +2,16 @@ import numpy as np
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
 from sklearn.neighbors import BallTree
-from extras import arr2string, string2arr, vec_translate, isempty
+from utils import arr2string, vec_translate, isempty
 import scipy.spatial
-from itertools import repeat, groupby
-from bayesianTools import labelAllTrajectories
+from itertools import repeat
 
 from config import DEFAULT_NEIGHBOR_THRESHOLD_UM, BREAK_COLLIDING_TRAJECTORIES_WIN_SIZE_FRAMES, \
     MAX_ALLOWED_COLLISIONS_IN_WIN, MIN_BROKEN_DF_LENGTH, MAX_PROCESSORS_LIMIT, BAYESIAN_MIN_STATE_DURATION_FRAMES, \
     MAX_FRAME_BEFORE_UNDERSAMPLING
 
 
-def getDiffs(df, dt, t_column_name="frame", is_df_padded=True, needToGroupBy=True):
+def get_diffs(df, dt, t_column_name="frame", is_df_padded=True, needToGroupBy=True):
     if is_df_padded:  # if ALL frames are filled
         diffs_df = df[["x", "y", "particle", "trajDuration", "isNotPad"]]
         keep_inds = diffs_df.index[diffs_df["isNotPad"].values]
@@ -49,7 +48,7 @@ def getDiffs(df, dt, t_column_name="frame", is_df_padded=True, needToGroupBy=Tru
     return [dx, dy, particle, trajDuration]
 
 
-def intersecting_neighbors(df, isPar=False, threshold=DEFAULT_NEIGHBOR_THRESHOLD_UM):
+def intersecting_neighbors(df, is_parallel=False, threshold=DEFAULT_NEIGHBOR_THRESHOLD_UM):
     # 5um looks like a good number for experiments of March 2022
     default_string_no_neighbors = "None"
 
@@ -62,9 +61,9 @@ def intersecting_neighbors(df, isPar=False, threshold=DEFAULT_NEIGHBOR_THRESHOLD
     N_neighbors_array_per_experiment = np.empty(N_groups, dtype=object)
     indices_per_experiment = np.empty(N_groups, dtype=object)
     print("Searching for colliding particles...")
-    # Parallelization per experiment causes memory overflow - instead parallelizing per frame in findNeighbors_experiment.
+    # Parallelization per experiment causes memory overflow - instead parallelizing per frame in find_neighbors_experiment.
     for j in range(N_groups):
-        output = findNeighbors_experiment(all_experiments_df[j], isPar=isPar)
+        output = find_neighbors_experiment(all_experiments_df[j], is_parallel=is_parallel)
         neighbors_array_per_experiment[j] = output[0]
         N_neighbors_array_per_experiment[j] = output[1]
         indices_per_experiment[j] = output[2]
@@ -83,7 +82,7 @@ def intersecting_neighbors(df, isPar=False, threshold=DEFAULT_NEIGHBOR_THRESHOLD
     return df
 
 
-def findNeighbors_experiment(df, isPar=False):
+def find_neighbors_experiment(df, is_parallel=False):
     gb_t = df.groupby("video_frame")
     Nframes = gb_t.ngroups
     all_frames_df = [t_df for _, t_df in gb_t]
@@ -92,16 +91,16 @@ def findNeighbors_experiment(df, isPar=False):
     N_neighbors_array_per_frame = np.empty(Nframes, dtype=object)
 
     if (len(df.particle.unique()) > 1) & (df.experiment.unique()[0].lower() != "synthetic"):
-        if isPar:
+        if is_parallel:
             with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
-                for k, output in enumerate(executor.map(findNeighbors_df, all_frames_df)):
+                for k, output in enumerate(executor.map(find_neighbors_df, all_frames_df)):
                     neighbors_array_per_frame[k] = output[0]
                     N_neighbors_array_per_frame[k] = output[1]
                     df_indices_array_per_frame[k] = output[2]
                     # print("Found neighbors for frame number " + str(k) + " (Parallel)")
         else:
             for k in range(Nframes):
-                output = findNeighbors_df(all_frames_df[k])
+                output = find_neighbors_df(all_frames_df[k])
                 neighbors_array_per_frame[k] = output[0]
                 N_neighbors_array_per_frame[k] = output[1]
                 df_indices_array_per_frame[k] = output[2]
@@ -118,16 +117,16 @@ def findNeighbors_experiment(df, isPar=False):
     return [neighbors_arr, N_neighbors_arr, indices_arr]
 
 
-def findNeighbors_df(frame_df):
+def find_neighbors_df(frame_df):
     threshold = frame_df["intersection_threshold"].values[0]
     X = frame_df[["x", "y"]].values  # Nx2 matrix of points
     P = frame_df["particle"].values.astype(int)  # Nx1 matrix of particle ID
 
-    # need to handle nan because it does problems in findNeighbors
+    # need to handle nan because it does problems in find_neighbors
     nan_ind = np.isnan(X[:, 0])
     X[nan_ind, :] = 100000.  # stam default value that doesnt collide with others
 
-    neighbors_ind = findNeighbors(X, threshold)
+    neighbors_ind = find_neighbors(X, threshold)
 
     neighbors = np.asarray(
         [arr2string(P[np.setdiff1d(ind, np.union1d(j, nan_ind))], delimiter=',') for j, ind in
@@ -143,20 +142,20 @@ def findNeighbors_df(frame_df):
     return [neighbors, N_neighbors, df_indices]
 
 
-def findNeighbors(X, threshold):
+def find_neighbors(X, threshold):
     tree = BallTree(X)
     neighbors_ind = tree.query_radius(X, threshold, return_distance=False, count_only=False, sort_results=False)
     return neighbors_ind
 
 
-def calc_rolling_R_gyration(df, isPar=False):
+def calc_rolling_R_gyration(df, is_parallel=False):
     df = df.copy()
     particles = df.particle.unique()
     all_particle_df = [particle_df for _, particle_df in df.groupby("particle")]
     Rg2_array_per_particle = [np.empty(0, dtype=float) for i in particles]
 
     print("Calculating radius of gyration...")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
             for j, output in enumerate(executor.map(calc_Rg_df, all_particle_df)):
                 Rg2_array_per_particle[j] = output
@@ -210,98 +209,8 @@ def calc_Rg_np(X, N_elements):
     return Rg2_arr
 
 
-def assignAllTrajStates(df, isPar=False):
-    return labelAllTrajectories(df,isPar)
-
-
-# def assignParticleTrajState(df_particle, T_stick, T_unstick, D, A, baseLen=64., skipImmobile=True):
-#     # Segment the particle trajectory to smaller parts and assign states to them by maximum likelihood, given specific parameters
-#     if len(df_particle) <= baseLen / 2:
-#         df = df_particle.copy()
-#         df["state"] = 0.
-#         df["logL_states"] = 0.
-#         logL_total = 0.
-#         return [df.index, df.state.values, df.logL_states.values, logL_total]
-#
-#     if skipImmobile & ~(df_particle.isMobile.values[0]):  # skip immobile particles - they are just stuck
-#         df = df_particle.copy()
-#         df["state"] = 1.
-#         df["logL_states"] = 0.
-#         logL_total = 0.
-#         return [df.index, df.state.values, df.logL_states.values, logL_total]
-#
-#     index_mat = segmentTraj(len(df_particle), baseLen=baseLen)
-#     N_segments = index_mat.shape[0]
-#     df = df_particle.copy()
-#     df["state"] = 0.
-#     df["logL_states"] = 0.
-#     logL_total = 0.
-#     for i in range(N_segments):
-#         df_out, max_likelihood = particleLikelihood(df[index_mat[i, 0]:(index_mat[i, 1] + 1)], T_stick, T_unstick, D, A,
-#                                                     1)
-#         states_assigned = df_out["state"].values
-#
-#         # remove state=0.5 from the edges of middle segments
-#         if i != 0:
-#             states_assigned[0] = states_assigned[1]
-#         if i != N_segments - 1:
-#             states_assigned[-1] = states_assigned[-2]
-#
-#         df.loc[df.index[index_mat[i, 0]:(index_mat[i, 1] + 1)], "state"] = states_assigned
-#         df.loc[df.index[index_mat[i, 0]:(index_mat[i, 1] + 1)], "logL_states"] = max_likelihood
-#         logL_total += max_likelihood
-#     # return df
-#     return [df.index, df.state.values, df.logL_states.values, logL_total]
-#
-#
-# def assignAllTrajStates(df_in, params_path, baseLen=64., isPar=False):
-#     parameters_table = pd.read_csv(params_path)
-#     table_experiments = parameters_table.experiment.unique()
-#
-#     df = df_in.copy()
-#     all_experiments = df.experiment.unique()
-#     N_experiments = len(all_experiments)
-#     df["state"] = 0.
-#     df["logL_states"] = 0.
-#     gb_exp = df.groupby("experiment")
-#
-#     for exp_id, experiment in enumerate(all_experiments):
-#         if not np.isin(experiment, table_experiments):
-#             continue
-#         cur_params = parameters_table[parameters_table.experiment == experiment]
-#         # obviously not elegant
-#         T_stick = cur_params.T_stick.values[0]
-#         T_unstick = cur_params.T_unstick.values[0]
-#         D = cur_params.D.values[0]
-#         A = cur_params.A.values[0]
-#         exp_df = gb_exp.get_group(experiment)
-#         particles = exp_df.particle.unique()
-#         N_particles = len(particles)
-#         gb_particle = exp_df.groupby("particle")
-#         all_particle_df = [gb_particle.get_group(i) for i in particles]
-#         if isPar:
-#             with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
-#                 for j, output in enumerate(executor.map(assignParticleTrajState, all_particle_df, repeat(T_stick),
-#                                                         repeat(T_unstick), repeat(D), repeat(A), repeat(baseLen))
-#                                            ):
-#                     df.loc[output[0], "state"] = output[1]
-#                     df.loc[output[0], "logL_states"] = output[2]
-#                     df.loc[output[0], "logL_total"] = output[3]
-#                     print("Assigned states to particle " + str(j) + " of " + str(N_particles) + " ; Experiment " + str(
-#                         exp_id) + "/" + str(N_experiments))
-#         else:
-#             for j, particle in enumerate(particles):
-#                 output = assignParticleTrajState(all_particle_df[j], T_stick, T_unstick, D, A, baseLen=baseLen)
-#                 df.loc[output[0], "state"] = output[1]
-#                 df.loc[output[0], "logL_states"] = output[2]
-#                 df.loc[output[0], "logL_total"] = output[3]
-#                 print("Assigned states to particle " + str(j) + " of " + str(N_particles) + " ; Experiment " + str(
-#                     exp_id) + "/" + str(N_experiments))
-#
-#         print("Assigned states to experiment " + experiment)
-#
-#     return df
-
+# def assign_all_traj_states(df, is_parallel=False):
+#     return labelAllTrajectories(df, is_parallel)
 
 def fit_D_n_particle(df_particle):
     trajDuration = df_particle.head(1).trajDuration.unique()[0]
@@ -309,7 +218,7 @@ def fit_D_n_particle(df_particle):
     dt_arr = np.arange(1, np.min([200, np.floor(trajDuration / 2)]), step=3)
     MSD_arr = 0 * dt_arr
     for k, dt in enumerate(dt_arr):
-        out = getDiffs(df_particle, dt, is_df_padded=True, needToGroupBy=False)
+        out = get_diffs(df_particle, dt, is_df_padded=True, needToGroupBy=False)
         dr2 = out[0] ** 2 + out[1] ** 2
         if len(dr2) >= 3:
             MSD_arr[k] = np.nanmean(dr2)
@@ -328,14 +237,14 @@ def fit_D_n_particle(df_particle):
     return [n_fit, D_fit]
 
 
-def assign_D_n_estimate(df, isPar=False):
+def assign_D_n_estimate(df, is_parallel=False):
     particles = df.particle.unique()
     gb = df.groupby("particle")
     all_particle_df = [gb.get_group(i) for i in particles]
     n_array = 0. * particles
     D_array = 0. * particles
     print("Assigning crude estimates of diffusion coefficients...")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
             for j, output in enumerate(executor.map(fit_D_n_particle, all_particle_df)):
                 n_array[j] = output[0]
@@ -364,7 +273,7 @@ def df_calculate_local_D(particle_df):
     return [D_local.values, D_local.index]
 
 
-def calculate_local_D(df, T=100, isPar=False):
+def calculate_local_D(df, T=100, is_parallel=False):
     df = df.copy()
     df["T_window"] = T
     particles = df.particle.unique()
@@ -373,7 +282,7 @@ def calculate_local_D(df, T=100, isPar=False):
     all_particle_df = [particle_df for _, particle_df in df.groupby("particle")]
 
     print("Calculating local diffusion coefficients...")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
             for j, output in enumerate(executor.map(df_calculate_local_D, all_particle_df)):
                 local_D_array_per_particle[j] = output[0]
@@ -394,34 +303,19 @@ def calculate_local_D(df, T=100, isPar=False):
     return df
 
 
-def generateMeanDiffusionDf(df, factor=4.):
-    gb = df.groupby("particle")
-    # improve this!
-    return pd.concat([factor * gb.D_est.first(),
-                      factor * gb.D_local_T_30.mean(),
-                      factor * gb.D_local_T_90.mean(),
-                      factor * gb.D_local_T_150.mean(),
-                      factor * 3. * (gb.Rg2_expanding.last() / gb.t.last().values).rename("Rg2/T"),
-                      factor * ((gb.x.last() - gb.x.first()) ** 2 / gb.t.last().values + \
-                                (gb.y.last() - gb.y.first()).values ** 2 / gb.t.last().values).rename("E2E") / 4.,
-                      gb.t.last().rename("t_end"),
-                      gb.experiment.first()
-                      ], axis=1)
-
-
-def shiftTrajToOrigin(df):
+def shift_traj_to_origin(df):
     df = df.copy()
     df['x'] = df['x'] - df.groupby('particle')['x'].transform('first')
     df['y'] = df['y'] - df.groupby('particle')['y'].transform('first')
     return df
 
 
-def smooth_states(df, min_state_duration_frames=3 * BAYESIAN_MIN_STATE_DURATION_FRAMES, isPar=False):
+def smooth_states(df, min_state_duration_frames=3 * BAYESIAN_MIN_STATE_DURATION_FRAMES, is_parallel=False):
     particle_df_array = [particle_df for _, particle_df in df.groupby("particle")]
     smoothed_states_array = np.empty(len(particle_df_array), dtype=object)
     print(
         "Smoothing particle states (temporary fix because of the problematic labeling!)")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
             for i, output in enumerate(
                     executor.map(smooth_particle_df_states, particle_df_array, repeat(min_state_duration_frames))):
@@ -443,21 +337,15 @@ def smooth_states(df, min_state_duration_frames=3 * BAYESIAN_MIN_STATE_DURATION_
 
 def smooth_particle_df_states(particle_df, min_state_duration_frames):
     states = particle_df.state.values
-    # print(states)
-    states[0] = states[1]
-    states[-1] = states[-2]
-    states = np.floor(states)
-    states[1 + np.where(np.abs(np.diff(states)) == 1)[0]] = 0.5
-    states[0] = 0.5
-    states[-1] = 0.5
-    split_states = np.split(states, np.where(states == 0.5)[0])[1:-1]  # this is missing the last 0.5
+    split_states = np.split(states, 1 + np.where(np.diff(states) != 0)[0])
     len_arr = [len(seg) for seg in split_states]
-    state_arr = [seg[1] for seg in split_states]
+    state_arr = [seg[0] for seg in split_states]
+
     valid_segs_ind = np.where(np.asarray(len_arr) >= min_state_duration_frames)[0]
     if (len(split_states) <= 1) | (len(valid_segs_ind) == 0):
         smoothed_states = states
     else:
-        smoothed_seg_arr = np.empty(len(split_states) + 1, dtype=object)
+        smoothed_seg_arr = np.empty(len(split_states) , dtype=object)
         flip_first_entry_flag = False
         for n, seg in enumerate(split_states):
             if len(seg) < min_state_duration_frames:
@@ -490,19 +378,18 @@ def smooth_particle_df_states(particle_df, min_state_duration_frames):
                     seg[0] = seg[1]
                 smoothed_seg_arr[n] = seg
                 flip_first_entry_flag = False
-        smoothed_seg_arr[-1] = [0.5]
         smoothed_states = np.hstack(smoothed_seg_arr)
     return smoothed_states
 
 
-def breakTrajectories_Collisions(df, win_size=BREAK_COLLIDING_TRAJECTORIES_WIN_SIZE_FRAMES,
-                                 max_allowed_collisions_in_window=MAX_ALLOWED_COLLISIONS_IN_WIN,
-                                 min_df_len=MIN_BROKEN_DF_LENGTH, isPar=False):
+def break_trajectories_collisions(df, win_size=BREAK_COLLIDING_TRAJECTORIES_WIN_SIZE_FRAMES,
+                                  max_allowed_collisions_in_window=MAX_ALLOWED_COLLISIONS_IN_WIN,
+                                  min_df_len=MIN_BROKEN_DF_LENGTH, is_parallel=False):
     particle_df_array = [p_df for _, p_df in df.groupby("particle")]
     particle_df_partition_array = np.empty(len(particle_df_array), dtype=object)
 
     print("Breaking trajectories due to collisions...")
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
             for i, output in enumerate(executor.map(segmentate_particle_df, particle_df_array, repeat(win_size),
                                                     repeat(max_allowed_collisions_in_window), repeat(min_df_len))):
@@ -543,34 +430,35 @@ def segmentate_particle_df(particle_df, win_size, max_allowed_collisions_in_wind
     return output
 
 
-def undersampleAllParticles(df, max_allowed_frame=MAX_FRAME_BEFORE_UNDERSAMPLING, isPar=False):
+def undersample_all_particles(df, max_allowed_frame=MAX_FRAME_BEFORE_UNDERSAMPLING, is_parallel=False):
     particle_df_array = [particle_df for _, particle_df in df.groupby("particle")]
-    factor_arr = np.asarray([np.ceil(len(particle_df) / max_allowed_frame) for particle_df in particle_df_array],dtype=int)
+    factor_arr = np.asarray([np.ceil(len(particle_df) / max_allowed_frame) for particle_df in particle_df_array],
+                            dtype=int)
     output_particle_df_array = np.empty(len(particle_df_array), dtype=object)
     print("Undersampling long trajectories (max allowed frames = {})".format(max_allowed_frame))
-    if isPar:
+    if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
-            for k, output in enumerate(executor.map(undersampleTraj, particle_df_array, factor_arr)):
+            for k, output in enumerate(executor.map(undersample_trajectory, particle_df_array, factor_arr)):
                 output_particle_df_array[k] = output
     else:
         for i, particle_df in enumerate(particle_df_array):
-            output_particle_df_array[i] = undersampleTraj(particle_df, factor_arr[i])
+            output_particle_df_array[i] = undersample_trajectory(particle_df, factor_arr[i])
 
     df = pd.concat(output_particle_df_array).reset_index(drop=True)
     return df
 
 
-def undersampleTraj(particle_df, factor):
+def undersample_trajectory(particle_df, factor):
     if factor > 1:
-        df = particle_df[::factor].copy() #copy to deal with the pesky warning!
+        df = particle_df[::factor].copy()  # copy to deal with the pesky warning!
         df.fps /= factor
         frames = df.frame.values
-        init_frame  = frames[0]
+        init_frame = frames[0]
         df.frame = (init_frame + (frames - init_frame) / factor).astype(int)
-        # df = addDisplacement(df, "x")
-        # df = addDisplacement(df, "y")
-        # df = addDisplacement(df, "t")  # must for bayesianTools
-        # df = addTrajDuration(df)
+        # df = add_displacement(df, "x")
+        # df = add_displacement(df, "y")
+        # df = add_displacement(df, "t")  # must for bayesianTools
+        # df = add_traj_duration(df)
     else:
         df = particle_df
     return df

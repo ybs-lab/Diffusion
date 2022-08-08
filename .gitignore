@@ -1,7 +1,6 @@
 .idea/
 Data/
-Outputs/files/
-Outputs/img4vid/
+Outputs/*
 Trajectories/
 Resources/Parameters/
 __pycache__/

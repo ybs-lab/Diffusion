@@ -8,7 +8,7 @@ from trajAnalysis import calc_rolling_R_gyration, intersecting_neighbors, assign
     break_trajectories_collisions, smooth_states, undersample_all_particles
 from config import TRAJECTORIES_DIR, DATA_DIR, IMAGING_PARAMETERS_PATH, MODEL_PARAMETERS_PATH, \
     PADDING_INTERPOLATION_MAX_FRAMES
-from model import Model
+from model import pack_model_params, model_generate_trajectories
 from model_utils import GenerationMode
 
 
@@ -81,16 +81,17 @@ def post_processing(df, imaging_params_path=IMAGING_PARAMETERS_PATH, assign_traj
     return df
 
 
-def generate_diffuse_tether_trajectories(T_stick, T_unstick, D, A, N_steps=1024, dt=1. / 30., N_particle=4, init_S=0,
-                                         undersample_ratio=0, save_files=False,
+def generate_diffuse_tether_trajectories(T_stick, T_unstick, D, A, dt=1. / 30., N_steps=1024, N_particle=1, init_S=0,
+                                         do_post_processing=True, undersample_ratio=0, save_files=False,
                                          generation_mode=GenerationMode.DONT_FORCE,
                                          is_parallel=False):
     """
     Generate a trajectory (see Model class) and wrap it as a dataframe
 
     """
-    model = Model(T_stick, T_unstick, D, A, dt)
-    states_arr, X_arr, X_tether_arr = model.generate_trajectories(N_steps, N_particle, init_S, generation_mode)
+    model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
+    states_arr, X_arr, X_tether_arr = model_generate_trajectories(N_steps, N_particle, init_S, model_params,
+                                                                  generation_mode)
 
     # Here model ends and it's just pandas stuff
     frame = np.tile(np.arange(N_steps, dtype=int), [N_particle, 1]).flatten()
@@ -125,8 +126,18 @@ def generate_diffuse_tether_trajectories(T_stick, T_unstick, D, A, N_steps=1024,
     df["filename"] = "synth_" + timestamp_str
     df["file_particle_id"] = df["particle"]
     df["video_frame"] = df["frame"]
-    df = post_processing(df, is_parallel=is_parallel, assign_traj_states=False, break_trajectory_at_collisions=False,
-                         undersampleLongTrajectories=False)
+
+    if do_post_processing and (undersample_ratio == 0.):
+        df = post_processing(df, is_parallel=is_parallel, assign_traj_states=False,
+                             break_trajectory_at_collisions=False,
+                             undersampleLongTrajectories=False)
+    else:  # just do a very minimal post_processing
+        df = scale_units(df, None)
+        df = add_displacement(df, "x")
+        df = add_displacement(df, "y")
+        df = add_displacement(df, "t")  # must for bayesianTools
+        df = add_traj_duration(df)
+        df['isNotPad'] = True
 
     if save_files:
         # save now

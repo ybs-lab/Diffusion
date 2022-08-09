@@ -3,194 +3,204 @@ from numpy import random
 from model_utils import GenerationMode
 
 
-class State:
+def pack_model_params(T_stick: float, T_unstick: float, D: float, A: float, dt: float, d=2):
     """
-    The state of a particle in our model.
+    Pack a dict containing all the model parameters, and also all the derived parameters used for the calculation
+    (e.g. calculate the log of some parameters here ones, instead of computing log each time)
+    """
+    MSD = 4 * D * dt  # comment: this is not really MSD in dimensions other than 2 - true MSD is (d/2) * 4*D*dt
+    r = 1. / T_stick + 1. / T_unstick  # combined rate
+    phi = np.exp(-r * dt)
 
-    Attributes:
-        S (int): 0 for free, 1 for stuck
-        X (2x1 array-like): the particle's position
-        X_tether (2x1 array-like): the particle's tether point
+    inertia_factor = np.exp(-D * dt / A)
+    modified_2A = 2 * A * (1 - inertia_factor ** 2)
+
+    model_params = {
+        'MSD': MSD,
+        'log_pi_MSD': 0.5 * d * np.log(np.pi * MSD),
+        'modified_2A': modified_2A,
+        'log_pi_modified_2A': 0.5 * d * np.log(np.pi * modified_2A),
+        'inertia_factor': inertia_factor,
+        # These are valid only if dt<<T_stick,T_unstick
+        'log_stay_free': np.log((T_stick + T_unstick * phi) / (T_stick + T_unstick)),
+        'log_stay_stuck': np.log((T_unstick + T_stick * phi) / (T_stick + T_unstick)),
+        'log_stick': np.log((T_unstick * (1 - phi)) / (T_stick + T_unstick)),
+        'log_unstick': np.log((T_stick * (1 - phi)) / (T_stick + T_unstick)),
+    }
+    return model_params
+
+
+def model_transition_log_probability(S_prev: int, S_curr: int, X_prev, X_curr, X_tether_prev, model_params: dict):
+    """
+    Calculate the log of probability of transition from one state to another, when they are separated by time dt, using
+    the model parameters. In essence this incorporates all the model information.
+
+    Args:
+        S_prev: 0 for free, 1 for stuck, of the state the transition is FROM
+        S_curr: 0 for free, 1 for stuck, of the state the transition is TO
+        X_prev (2x1 float): position (x,y) of the state the transition is FROM
+        X_curr (2x1 float): position (x,y) of the state the transition is TO
+        X_tether_prev (2x1): tether position (x,y) of the state the transition is FROM
+        model_params: this includes all the model parameters, the time step dt, and some products and logs of them
+        (comment: don't need X_tether_curr)
+
+        self: Model class - this provides the 4 model parameters, and optionally dt and P
+        from_state: the state from which there is a transition to the destination state
+        to_state: the destination state
+        dt (float): optional argument of the delta t between the states, if not given then take from self
+
+    Returns:
+        L (float): log of the probability of the transition. Could be -np.inf for zero-probability transitions.
     """
 
-    def __init__(self, S: int, X, X_tether):
-        self.S = S
-        self.X = X
-        self.X_tether = X_tether
-
-
-class Model:
-    """
-    Our Markov model for the particle dynamics - alternating between free diffusion and tethering.
-
-    The model comprises of 4 parameters: T_stick,T_unstick,D,A. This class has methods for calculating the transition
-    log-likelihood between two states (class State) and for generating trajectories according to the model.
-
-    Attributes:
-        T_stick (float): mean sticking time (seconds)
-        T_unstick (float): mean unsticking time (seconds)
-        D (float): diffusion coefficient in the free state (um^2/second)
-        A (float): mean area of the potential well in the stuck state (um^2)
-        dt (float): time between two samples (seconds) - this serves as a default for the class methods
-        P (2x2 array-like): transition matrix between free and stuck states (no units)
-            [Comment: P is an attribute just to save repeated computations of the matrix]
-
-    """
-
-    def __init__(self, T_stick: float, T_unstick: float, D: float, A: float, dt: float):
-        """
-        Set attributes and also calculate the P matrix with the input dt, to save further calculations.
-        """
-        self.T_stick = T_stick
-        self.T_unstick = T_unstick
-        self.D = D
-        self.A = A
-        self.dt = dt
-        self.P = self.generate_CTMC_Matrix()
-
-    def transition_log_likelihood(self, from_state: State, to_state: State, dt=None, enforce_same_tether=False):
-        """
-        Calculate the likelihood of transition from one state to another, when they are separated by time dt, using
-        the model parameters (from the class attributes). In essence this incorporates all the model information.
-
-        Args:
-            self: Model class - this provides the 4 model parameters, and optionally dt and P
-            from_state: the state from which there is a transition to the destination state
-            to_state: the destination state
-            dt (float): optional argument of the delta t between the states, if not given then take from self
-            enforce_same_tether (bool): return -inf if there is a transition of stuck to stuck with different tethers.
-                (if this restriction is enforced in an outside algorithm, no need to spend computation on checking).
-
-
-        Returns:
-            L (float): log-likelihood of the transition. Could be -np.inf for zero-probability transitions.
-        """
-
-        # First enforce the tether to stay the same unless this is a sticking event or the particle is not stuck
-        # Doing this enforcement slows the function, and this enforcement can be ensured at the iterative Viterbi algorithm
-        # [don't link states tethered to Y0 with a state tethered to Y1]
-        if enforce_same_tether and to_state.S == 1 and from_state.S == 1 and not np.all(
-                np.isclose(from_state.X_tether, to_state.X_tether)):
-            return -np.inf
-
-        if dt is None:
-            dt = self.dt
-            P = self.P
+    if S_prev == 0:
+        # Start as free
+        spatial = - np.sum((X_curr - X_prev) ** 2) / model_params['MSD'] - model_params['log_pi_MSD']
+        if S_curr == 0:
+            # free -> free
+            temporal = model_params['log_stay_free']
         else:
-            P = self.generate_CTMC_Matrix(dt)
-        # Calculate as normal from here
-        # Temporal part (state transitions)
-        L = np.log(P[from_state.S, to_state.S])
-        # Spatial part
-        if from_state.S == 0:  # free
-            MSD = 4 * self.D * dt  # expected MSD in time dt
-            L += -(np.log(np.pi * MSD) + np.sum(to_state.X - from_state.X) ** 2 / MSD)
+            # free -> stuck
+            temporal = model_params['log_stick']
+    else:
+        # Start as stuck
+        spatial = - np.sum(
+            ((X_curr - X_tether_prev) - model_params['inertia_factor'] * (X_prev - X_tether_prev)) ** 2) / (
+                      model_params['modified_2A']) - model_params['log_pi_modified_2A']
+        if S_curr == 0:
+            # stuck -> free
+            temporal = model_params['log_unstick']
         else:
-            L += -(np.log(np.pi * self.A) + np.sum(to_state.X - from_state.X_tether) ** 2 / self.A)
-        return L
+            # #stuck -> stuck
+            temporal = model_params['log_stay_stuck']
+    L = spatial + temporal
+    return L
 
-    def generate_CTMC_Matrix(self, dt=None):
-        if dt is None:
-            dt = self.dt
-        P = np.zeros([2, 2])
-        r = 1. / self.T_stick + 1. / self.T_unstick  # combined rate
-        phi = np.exp(-r * dt)
-        P[0, 0] = self.T_stick + self.T_unstick * phi
-        P[0, 1] = self.T_unstick * (1 - phi)
-        P[1, 0] = self.T_stick * (1 - phi)
-        P[1, 1] = self.T_unstick + self.T_stick * phi
-        P /= (self.T_stick + self.T_unstick)
-        return P
 
-    def generate_trajectories(self, N_steps: int, N_particle: int, init_S, generation_mode=GenerationMode.DONT_FORCE):
-        """
-        Generate a series of States drawn from the distribution corresponding to the model. This has a vectorized
-        implementation for generating trajectories of multiple particles. All particles have the same trajectory length.
+def model_generate_trajectories(N_steps: int, N_particle: int, init_S, model_params: dict,
+                                generation_mode=GenerationMode.DONT_FORCE):
+    """
+    Generate a series of States drawn from the distribution corresponding to the model. This has a vectorized
+    implementation for generating trajectories of multiple particles. All particles have the same trajectory length.
 
-        Args:
-            self: Model class - this provides the 4 model parameters AND the time step dt
-            N_steps: duration of trajectory (in steps) for each of the particles
-            N_particles: how many trajectories to generate. Note: all trajectories start at X=[0,0].
-            init_S: initial S for each of the particles: 0 is free, 1 is stuck, None is random for each particle (50%).
-            generation_mode: FORCE_FREE and FORCE_STUCK make all the particles free or stuck all the time. DONT_FORCE
-            allows for transitions according to the model.
+    Args:
+        N_steps: duration of trajectory (in steps) for each of the particles
+        N_particles: how many trajectories to generate. Note: all trajectories start at X=[0,0].
+        init_S: initial S for each of the particles: 0 is free, 1 is stuck, None is random for each particle (50%).
+        generation_mode: FORCE_FREE and FORCE_STUCK make all the particles free or stuck all the time. DONT_FORCE
+        allows for transitions according to the model.
+        model_params: dict with parameters of the model
 
-        Returns:
-            states_arr (N_particle x N_steps int ndarray): states for each particle at each time step.
-            X_arr (N_particle x N_steps x 2 float ndarray): positions (x,y) for each particle at each time step.
-            X_tether_arr (N_particle x N_steps x 2 float ndarray): tether point (x,y) for each particle at each step.
-            (Comment: effectively this is a N_particle x N_step State matrix.)
+    Returns:
+        states_arr (N_particle x N_steps int ndarray): states for each particle at each time step.
+        X_arr (N_particle x N_steps x 2 float ndarray): positions (x,y) for each particle at each time step.
+        X_tether_arr (N_particle x N_steps x 2 float ndarray): tether point (x,y) for each particle at each step.
+        (Comment: effectively this is a N_particle x N_step State matrix.)
 
-        """
-        reduce_tethering_range = 0.  # 1e-10 # MOVE THIS TO ARGUMENTS OR SMNTHG
+    """
+    reduce_tethering_range = 0.  # 1e-10 # MOVE THIS TO ARGUMENTS OR SMNTHG
 
-        if generation_mode == GenerationMode.FORCE_FREE:
-            init_S = 0.
-        elif generation_mode == GenerationMode.FORCE_STUCK:
-            init_S = 1.
+    if generation_mode == GenerationMode.FORCE_FREE:
+        init_S = 0
+    elif generation_mode == GenerationMode.FORCE_STUCK:
+        init_S = 1
 
-        init_state_arr = np.zeros(N_particle)
-        if init_S == 1:
-            init_state_arr += 1
-        elif init_S is None:
-            init_state_arr = np.random.randint(2, size=N_particle).astype(float)
+    init_state_arr = np.zeros(N_particle)
+    if init_S == 1:
+        init_state_arr += 1
+    elif init_S is None:
+        init_state_arr = np.random.randint(2, size=N_particle).astype(int)
 
-        states_arr = np.zeros([N_particle, N_steps])
-        X_arr = np.zeros([N_particle, N_steps, 2])
-        X_tether_arr = np.zeros([N_particle, N_steps, 2])
-        states_arr[:, 0] = init_state_arr
+    states_arr = np.zeros([N_particle, N_steps],dtype=int)
+    X_arr = np.zeros([N_particle, N_steps, 2])
+    X_tether_arr = np.zeros([N_particle, N_steps, 2])
+    states_arr[:, 0] = init_state_arr
 
-        P = self.P.copy()
-        if generation_mode == GenerationMode.FORCE_FREE:
-            P[:, 0] = 0.
-            P[:, 1] = 1.
-        elif generation_mode == GenerationMode.FORCE_STUCK:
-            P[:, 0] = 1.
-            P[:, 1] = 0.
-
-        # Stream of 2D gaussian RV with variance 1
-        gaussian_Stream = random.default_rng().normal(loc=0.0, scale=1, size=[N_particle, N_steps, 2])
-
-        # This is for when a particle sticks and another random sample is needed for the tether point
-        extra_gaussian_Stream = random.default_rng().normal(loc=0.0, scale=1,
-                                                            size=[N_particle, N_steps, 2])
-
-        uniform_Stream = random.default_rng().random(size=[N_particle, N_steps])
-
-        # for clarity X_tether is initialized only for stuck
-        X_tether_arr[np.where(init_state_arr == 1.), 0, :] = reduce_tethering_range*np.sqrt(self.A) * gaussian_Stream[
-                                                                               np.where(init_state_arr == 1.), 0,
-                                                                               :]
-
+    P = np.zeros([2, 2])
+    if generation_mode == GenerationMode.DONT_FORCE:
         # note: this is valid only when dt<<T_stick,T_unstick
+        P[0, 0] = np.exp(model_params["log_stay_free"])
+        P[0, 1] = np.exp(model_params["log_stick"])
+        P[1, 0] = np.exp(model_params["log_unstick"])
+        P[1, 1] = np.exp(model_params["log_stay_stuck"])
+    if generation_mode == GenerationMode.FORCE_FREE:
+        P[:, 0] = 0.
+        P[:, 1] = 1.
+    elif generation_mode == GenerationMode.FORCE_STUCK:
+        P[:, 0] = 1.
+        P[:, 1] = 0.
 
-        for n in range(1, N_steps):
-            free_inds = np.where(states_arr[:, n - 1] == 0.)[0]
-            stuck_inds = np.where(states_arr[:, n - 1] == 1.)[0]
+    # Stream of 2D gaussian RV with variance 1
+    gaussian_Stream = random.default_rng().normal(loc=0.0, scale=1, size=[N_particle, N_steps, 2])
 
-            # Free particles diffuse
-            X_arr[free_inds, n, :] = X_arr[free_inds, n - 1, :] + np.sqrt(4 * self.D * self.dt) * gaussian_Stream[
-                                                                                                  free_inds,
-                                                                                                  n, :]
-            X_tether_arr[free_inds,n,:]=np.nan
-            # Stuck particles wiggle
-            X_arr[stuck_inds, n, :] = X_tether_arr[stuck_inds, n - 1, :] + np.sqrt(self.A) * gaussian_Stream[stuck_inds,
-                                                                                             n, :]
+    # This is for when a particle sticks and another random sample is needed for the tether point
+    extra_gaussian_Stream = random.default_rng().normal(loc=0.0, scale=1,
+                                                        size=[N_particle, N_steps, 2])
 
-            # Tether point continues UNLESS going to stick
-            X_tether_arr[:, n, :] = X_tether_arr[:, n - 1, :]
+    uniform_Stream = random.default_rng().random(size=[N_particle, N_steps])
 
-            # Stick or unstick:
-            sticking_inds = free_inds[np.where(uniform_Stream[free_inds, n] > P[0, 0])[0]]
-            staying_free_inds = np.setdiff1d(free_inds, sticking_inds)
-            unsticking_inds = stuck_inds[np.where(uniform_Stream[stuck_inds, n] > P[1, 1])[0]]
-            staying_stuck_inds = np.setdiff1d(stuck_inds, unsticking_inds)
+    # for clarity X_tether is initialized only for stuck
+    X_tether_arr[np.where(init_state_arr == 1.), 0, :] = reduce_tethering_range * np.sqrt(
+        model_params['modified_2A']) * gaussian_Stream[np.where(init_state_arr == 1.), 0, :]
 
-            states_arr[np.union1d(unsticking_inds, staying_free_inds), n] = 0.
-            states_arr[np.union1d(sticking_inds, staying_stuck_inds), n] = 1.
+    for n in range(1, N_steps):
+        free_inds = np.where(states_arr[:, n - 1] == 0.)[0]
+        stuck_inds = np.where(states_arr[:, n - 1] == 1.)[0]
 
-            # Sticking particles tether to a point
-            X_tether_arr[sticking_inds, n, :] = X_arr[sticking_inds, n, :] + \
-                                                reduce_tethering_range * np.sqrt(self.A) * extra_gaussian_Stream[
-                                                                                           sticking_inds, n, :]
-        return states_arr, X_arr, X_tether_arr
+        # Free particles diffuse
+        X_arr[free_inds, n, :] = X_arr[free_inds, n - 1, :] + \
+                                 np.sqrt(model_params['MSD']) * gaussian_Stream[free_inds, n, :]
+        X_tether_arr[free_inds, n, :] = np.nan
+        # Stuck particles wiggle
+
+        X_arr[stuck_inds, n, :] = X_tether_arr[stuck_inds, n - 1, :] * (1 - model_params['inertia_factor']) + \
+                                  X_arr[stuck_inds, n - 1, :] * model_params['inertia_factor'] + \
+                                  np.sqrt(model_params['modified_2A']) * gaussian_Stream[stuck_inds, n, :]
+
+        X_arr[stuck_inds, n, :] = X_tether_arr[stuck_inds, n - 1, :] + \
+                                  np.sqrt(model_params['modified_2A']) * gaussian_Stream[stuck_inds, n, :]
+
+        # Tether point continues UNLESS going to stick
+        X_tether_arr[:, n, :] = X_tether_arr[:, n - 1, :]
+
+        # Stick or unstick:
+        sticking_inds = free_inds[np.where(uniform_Stream[free_inds, n] > P[0, 0])[0]]
+        staying_free_inds = np.setdiff1d(free_inds, sticking_inds)
+        unsticking_inds = stuck_inds[np.where(uniform_Stream[stuck_inds, n] > P[1, 1])[0]]
+        staying_stuck_inds = np.setdiff1d(stuck_inds, unsticking_inds)
+
+        states_arr[np.union1d(unsticking_inds, staying_free_inds), n] = 0.
+        states_arr[np.union1d(sticking_inds, staying_stuck_inds), n] = 1.
+
+        # Sticking particles tether to a point
+        X_tether_arr[sticking_inds, n, :] = X_arr[sticking_inds, n, :] + \
+                                            reduce_tethering_range * \
+                                            np.sqrt(model_params['modified_2A']) * \
+                                            extra_gaussian_Stream[sticking_inds, n, :]
+
+    return states_arr, X_arr, X_tether_arr
+
+
+def model_trajectory_log_probability(S_arr, X_arr, model_params: dict):
+    """
+    Calculate the log of probability of one particle's trajectory (including hidden states)
+
+    Args:
+        S_arr (Nx1 int): list of states - 0 is free, 1 is stuck
+        X_arr (Nx2 float): list of particle positions
+        model_params: this includes all the model parameters, the time step dt, and some products and logs of them
+
+    Returns:
+        L (float): log of the probability of the trajectory (sum of the probabilities of each transition)
+    """
+    N = len(S_arr)
+    L = 0.
+    X_tether = X_arr[0]  # placeholder unless S[0]!=0 and then we assume the particle is stuck at X[0].
+    for n in range(1, N):
+        L += model_transition_log_probability(S_arr[n - 1], S_arr[n], X_arr[n - 1], X_arr[n], X_tether, model_params)
+        # Update the tether point
+        # (it's ok that is after the likelihood calculation because X_tether matters only if S_arr[n-1]!=0)
+        if (S_arr[n - 1] == 0) and (S_arr[n] != 0):
+            X_tether = X_arr[n]
+
+    return L

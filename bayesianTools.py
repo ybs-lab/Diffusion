@@ -1,12 +1,12 @@
 import numpy as np
-from utils import isnotebook
+from numba import jit
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from config import MAX_PROCESSORS_LIMIT, MAX_AVAILABLE_STATES_TO_KEEP, FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO
-from model import Model, State
+from model import model_transition_log_probability, pack_model_params
 
 
-def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: float, dt: float, log_process=False):
+def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: float, dt: float, do_backprop=True, ):
     """
     Given a particle's series of observed positions X_arr, and model parameters, find the most likely sequence of hidden
     states S and X_tether.
@@ -46,7 +46,8 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
         D: model parameter
         A: model parameter
         dt: time step between samples [Todo later: replace with t_arr to allow for uneven sampling]
-        log_process: print algorithm progress.
+        do_backprop: if True then return the Viterbi path (via backprop) and its likelihood. If False, just return
+                     the best path's likelihood without getting the path itself (use False for optimization)
 
 
     Returns:
@@ -56,25 +57,9 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
 
     """
     # 1. Initialization
-    model = Model(T_stick, T_unstick, D, A, dt)
     N = len(X_arr)  # trajectory length
     K = N + 1  # total number of possible hidden states
-
-    # Construct State objects:
-    from_state = State(0, [0., 0.], [0., 0.])
-    to_state = State(0, [0., 0.], [0., 0.])
-
-    def L(n, i, j):
-        """
-        Calculate the log-likelihood of transition from hidden state i at time n-1 to hidden state j at time n
-        """
-
-        # First values in from_state and to_state
-        ind2state(n - 1, i, from_state, X_arr)
-        ind2state(n, j, to_state, X_arr)
-
-        # Then calculate by the model
-        return model.transition_log_likelihood(from_state, to_state)
+    model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
 
     # Log-likelihood matrix L_mat[i,n] is the log-likelihood of the most likely path that
     # reaches state i at time n (n time points so this is the sum of n-1 step contributions + initial condition)
@@ -86,8 +71,6 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
 
     # More parameters
     squared_distance_discard_threshold = FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO * A  # For the first filter
-    isNotebook = isnotebook()  # For logging
-
     # Initialize: equal prior for stuck or free at time 0 (leave L[:,0]=0)
     # all unreached end destinations are by default with 0 probability, and only if we reach them then their probability
     # is to be considered (some states won't be reached due to the paths discarding).
@@ -119,7 +102,8 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
         for j in available_source_hidden_states:
             if j == 0:  # only the free state has multiple paths leading to it (more than one source state)
                 # Choose the best path to j from all available states i - this is the Viterbi algorithm!
-                logL_paths_to_j = [L_mat[i, n - 1] + L(n, i, j) for i in available_source_hidden_states]
+                logL_paths_to_j = [L_mat[i, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, i, j)
+                                   for i in available_source_hidden_states]
                 ind_max = np.argmax(logL_paths_to_j)
                 S_mat[j, n] = available_source_hidden_states[ind_max]
                 L_mat[j, n] = logL_paths_to_j[ind_max]
@@ -130,70 +114,58 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
                 # for 0<j<n+1, can only get to j from j (stuck in the same place)
                 # as long as this i is still valid (very far tether points are forgotten)
                 S_mat[j, n] = j
-                L_mat[j, n] = L_mat[j, n - 1] + L(n, j, j)
+                L_mat[j, n] = L_mat[j, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, j, j)
         # In addition consider the sticking from free (i=0) to stuck at location j (state j=n+1)
         S_mat[n + 1, n] = 0
-        L_mat[n + 1, n] = L_mat[0, n - 1] + L(n, 0, n + 1)
-        # Some logging:
-        if log_process:
-            if n % int(np.ceil(N / 10)) == 0:
-                if isNotebook:
-                    print("Processed {}% of the trajectory".format(int(np.floor(100 * n / N))), end="\r")
-                else:
-                    print("Processed {}% of the trajectory".format(int(np.floor(100 * n / N))))
-
+        L_mat[n + 1, n] = L_mat[0, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, 0, n + 1)
     # 3. Matrices are filled - now we backprop to the start to find the path itself:
     # We find the best end point and then trace it back to obtain the full path
     viterbi_path_final_state = np.argmax(L_mat[:, - 1])
     viterbi_path_log_likelihood = L_mat[viterbi_path_final_state, - 1]
-    viterbi_path = np.zeros(N, dtype=int)
-    viterbi_path[N - 1] = viterbi_path_final_state
-    # Now follow along state matrix S_mat
-    for n in reversed(range(1, N)):
-        viterbi_path[n - 1] = S_mat[viterbi_path[n], n]
 
-    # Now convert this from the indices i to S and X_tether:
-    # (for efficiency we don't use ind2state for this part)
-    S_arr = np.zeros(N, dtype=int)
-    X_tether_arr = np.zeros([N, 2], dtype=float)
+    if do_backprop:
+        # Find the best trajectory and not just the best path's likelihood
+        S_arr = np.zeros(N, dtype=int)
+        X_tether_arr = np.zeros([N, 2], dtype=float)
+        viterbi_path = np.zeros(N, dtype=int)
+        viterbi_path[N - 1] = viterbi_path_final_state
+        # Now follow along state matrix S_mat
+        for n in reversed(range(1, N)):
+            viterbi_path[n - 1] = S_mat[viterbi_path[n], n]
 
-    for n in range(N):
-        i = viterbi_path[n]  # state
-        if i == 0:
-            S_arr[n] = 0
-            X_tether_arr[n, :] = np.nan
-        else:
-            S_arr[n] = 1
-            X_tether_arr[n, :] = X_arr[i - 1, :]
+        # Now convert this from the indices i to S and X_tether:
+        # (for efficiency we don't use ind2state for this part)
 
-    if log_process:
-        if isNotebook:
-            print("")
-        print("Done with Viterbi Algorithm!")
+        for n in range(N):
+            i = viterbi_path[n]  # state
+            if i == 0:
+                S_arr[n] = 0
+                X_tether_arr[n, :] = np.nan
+            else:
+                S_arr[n] = 1
+                X_tether_arr[n, :] = X_arr[i - 1, :]
+    else:
+        S_arr = None
+        X_tether_arr = None
+
     return S_arr, X_tether_arr, viterbi_path_log_likelihood
 
 
-def ind2state(n: int, i: int, state: State, X_arr):
-    """
-    Convert a discrete hidden state index i at time n to a State from the model's state space. Assigns value in input
-    state object to avoid constructing each time. See hidden state index in the Viterbi algorithm documentation.
-
-    Args:
-        n - time step
-        i - hidden state index
-        state - State object in which to store the state properties (instead of constructing a new one each time)
-        X_arr - array of positions (from which the position and tether points are obtained)
-
-    Doesn't return anything, instead assigning the values in the input state.
+def transition_log_probability_viterbi(model_params, X_arr, n, i, j):
     """
 
-    state.X = X_arr[n]
-    if i == 0:
-        state.S = 0
-        # don't care about X_tether if free
-    else:
-        state.S = 1
-        state.X_tether = X_arr[i - 1]
+    This calculates the transition probability from the hidden state i to the hidden state j in time n.
+    Essentially this translates the Viterbi algorithm's n,i,j hidden state indices to the model's full physical states.
+
+    """
+    return model_transition_log_probability(
+        S_prev=i,  # i=0 is free, else is stuck
+        S_curr=j,  # j=0 is free, else is stuck
+        X_prev=X_arr[n - 1],
+        X_curr=X_arr[n],
+        X_tether_prev=X_arr[i - 1],  # if i=0 then this has no meaning anyway
+        model_params=model_params
+    )
 
 
 def extract_X_arr_list_from_df(df):
@@ -235,11 +207,13 @@ def multiple_trajectories_likelihood(X_arr_list, dt_list, T_stick: float, T_unst
     if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
             for n, output in enumerate(executor.map(viterbi_algorithm, X_arr_list, repeat(T_stick),
-                                                    repeat(T_unstick), repeat(D), repeat(A), dt_list)):
+                                                    repeat(T_unstick), repeat(D), repeat(A), dt_list, repeat(False)
+                                                    )):
                 L_arr[n] = output[2]
     else:
         for n in range(N_particles):
-            _, _, L = viterbi_algorithm(X_arr_list[n], T_stick, T_unstick, D, A, dt_list[n], log_process=False)
+            _, _, L = viterbi_algorithm(X_arr_list[n], T_stick, T_unstick, D, A, dt_list[n],
+                                        do_backprop=False)
             L_arr[n] = L
 
     return np.sum(L_arr / length_arr) / N_particles

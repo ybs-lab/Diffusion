@@ -148,7 +148,7 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
         viterbi_path = np.zeros(N, dtype=np.int32)
         viterbi_path[N - 1] = viterbi_path_final_state
         # Now follow along state matrix S_mat
-        for n in np.flip(np.arange(1, N,dtype=np.int32)):
+        for n in np.flip(np.arange(1, N, dtype=np.int32)):
             viterbi_path[n - 1] = S_mat[viterbi_path[n], n]
 
         # Now convert this from the indices i to S and X_tether:
@@ -205,11 +205,11 @@ def multiple_trajectories_likelihood(X_arr_list, dt_list, T_stick: float, T_unst
     L_arr = np.zeros(N_particles)  # log likelihood array
     length_arr = np.asarray([len(X_arr) for X_arr in X_arr_list])  # trajectory length array
 
-    model_params = pack_model_params(T_stick, T_unstick, D, A, dt_list.mean())  # TODO: FIX THIS!!!
+    model_params = pack_model_params(T_stick, T_unstick, D, A, np.mean(dt_list))  # TODO: FIX THIS!!!
 
     if is_parallel:
         with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
-            for n, output in enumerate(executor.map(viterbi_algorithm, X_arr_list, model_params, repeat(False)
+            for n, output in enumerate(executor.map(viterbi_algorithm, X_arr_list, repeat(model_params), repeat(False)
                                                     )):
                 L_arr[n] = output[2]
     else:

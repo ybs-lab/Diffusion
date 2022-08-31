@@ -5,3 +5,6 @@ Trajectories/
 Resources/Parameters/
 __pycache__/
 .ipynb_checkpoints/
+*.npy
+*.png
+*.m

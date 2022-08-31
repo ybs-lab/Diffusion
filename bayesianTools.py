@@ -1,5 +1,4 @@
 import numpy as np
-from numba import jit
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 from config import MAX_PROCESSORS_LIMIT, MAX_AVAILABLE_STATES_TO_KEEP, FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO
@@ -87,11 +86,12 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
         valid_hidden_states_mask[1:] *= np.sum((X_arr - X_arr[n]) ** 2, axis=1) <= squared_distance_discard_threshold
 
         # Filter 2: keep only the MAX_AVAILABLE_STATES_TO_KEEP-2 most likely stuck states
-
-        # if np.sum(valid_hidden_states_mask) > MAX_AVAILABLE_STATES_TO_KEEP - 1:
-        #     valid_hidden_states_mask[
-        #         1 + np.argsort(L_mat[hidden_states_list[valid_hidden_states_mask][1:], n - 1])[
-        #             :-(MAX_AVAILABLE_STATES_TO_KEEP - 2)]] = False
+        if np.sum(valid_hidden_states_mask) > MAX_AVAILABLE_STATES_TO_KEEP - 1:
+            nonfree_valid_hidden_states = hidden_states_list[valid_hidden_states_mask][1:]
+            valid_hidden_states_mask[
+                nonfree_valid_hidden_states[
+                    np.argsort(L_mat[nonfree_valid_hidden_states, n - 1])
+                ][: -(MAX_AVAILABLE_STATES_TO_KEEP - 2)]] = False
 
         # Allow for the recently stuck at n-1 state to be valid. The free state is always valid.
         valid_hidden_states_mask[n] = True
@@ -99,11 +99,17 @@ def viterbi_algorithm(X_arr, T_stick: float, T_unstick: float, D: float, A: floa
         available_source_hidden_states = hidden_states_list[
             valid_hidden_states_mask]  # these are the available SOURCE states
         # j is DESTINATION state - its allowed states are the available SOURCE states + state n+1
+
         for j in available_source_hidden_states:
             if j == 0:  # only the free state has multiple paths leading to it (more than one source state)
                 # Choose the best path to j from all available states i - this is the Viterbi algorithm!
-                logL_paths_to_j = [L_mat[i, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, i, j)
-                                   for i in available_source_hidden_states]
+                # logL_stay_free = L_mat[0, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, 0, j)
+                #
+                # logL_unstick_paths=L_mat[i, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, available_source_hidden_states[:1], j)
+                # logL_paths_to_j = [L_mat[i, n - 1] + transition_log_probability_viterbi(model_params, X_arr, n, i, j)
+                #                    for i in available_source_hidden_states]
+                logL_paths_to_j = L_mat[available_source_hidden_states, n - 1] + transition_log_probability_viterbi(
+                    model_params, X_arr, n, available_source_hidden_states, j)
                 ind_max = np.argmax(logL_paths_to_j)
                 S_mat[j, n] = available_source_hidden_states[ind_max]
                 L_mat[j, n] = logL_paths_to_j[ind_max]
@@ -158,18 +164,20 @@ def transition_log_probability_viterbi(model_params, X_arr, n, i, j):
     Essentially this translates the Viterbi algorithm's n,i,j hidden state indices to the model's full physical states.
 
     """
-    return model_transition_log_probability(
+
+    L = model_transition_log_probability(
         S_prev=i,  # i=0 is free, else is stuck
         S_curr=j,  # j=0 is free, else is stuck
-        X_prev=X_arr[n - 1],
+        X_prev=X_arr[n - 1],  # need the transpose!
         X_curr=X_arr[n],
         X_tether_prev=X_arr[i - 1],  # if i=0 then this has no meaning anyway
         model_params=model_params
     )
+    return L
 
 
 def extract_X_arr_list_from_df(df):
-    return [particle_df[["x", "y"]].values for _, particle_df in df.groupby("particle")]
+    return np.asarray([particle_df[["x", "y"]].values for _, particle_df in df.groupby("particle")])
 
 
 def extract_dt_list_from_df(df):

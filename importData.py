@@ -6,7 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from utils import now_string, vec_translate, index_intervals_extract
 from trajAnalysis import calc_rolling_R_gyration, intersecting_neighbors, assign_D_n_estimate, calculate_local_D, \
     break_trajectories_collisions, smooth_states, undersample_all_particles
-from config import TRAJECTORIES_DIR, DATA_DIR, IMAGING_PARAMETERS_PATH, MODEL_PARAMETERS_PATH, \
+from config import TRAJECTORIES_DIR, DATA_DIR, IMAGING_PARAMETERS_PATH, \
     PADDING_INTERPOLATION_MAX_FRAMES
 from model import pack_model_params, model_generate_trajectories
 from model_utils import GenerationMode
@@ -25,7 +25,7 @@ def import_all(get_latest=True, assign_traj_states=False, break_trajectory_at_co
                              break_trajectory_at_collisions=break_trajectory_at_collisions, is_parallel=is_parallel)
         df.to_feather(df_path)
     else:  # read from feather (fast)
-        df_list = glob.glob(os.path.join(DATA_DIR, "/df*.fea"))
+        df_list = glob.glob(os.path.join(DATA_DIR, "df*.fea"))
         df_path = max(df_list, key=os.path.getctime)
         df = pd.read_feather(df_path)
         print("Dataframe read from " + df_path.replace('\\', '/'))
@@ -87,7 +87,6 @@ def generate_diffuse_tether_trajectories(T_stick, T_unstick, D, A, dt=1. / 30., 
                                          is_parallel=False):
     """
     Generate a trajectory (see Model class) and wrap it as a dataframe
-
     """
     model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
     states_arr, X_arr, X_tether_arr = model_generate_trajectories(N_steps, N_particle, init_S, model_params,

@@ -5,6 +5,8 @@ import os
 import numpy as np
 from itertools import groupby
 from datetime import datetime
+import scipy.ndimage.measurements as mnts
+
 
 def profile(mode, profiler=[], filename='profile_results'):
     if mode.lower() == "on":
@@ -20,7 +22,8 @@ def profile(mode, profiler=[], filename='profile_results'):
         with open((filename + '.txt'), 'w+') as f:
             f.write(s.getvalue())
         pr.dump_stats((filename + '.prof'))
-        print("For a good ui view, execute in terminal: snakeviz ./" + filename + ".prof")
+        print(
+            "For a good ui view, execute in terminal: snakeviz ./" + filename + ".prof" + "\nOr go to https://nejc.saje.info/pstats-viewer.html")
 
 
 def now_string():
@@ -181,3 +184,10 @@ def isnotebook():
             return False  # Other type (?)
     except NameError:
         return False  # Probably standard Python interpreter
+
+
+def arr_of_length_of_true_segments(arr):
+    # from https://stackoverflow.com/questions/49776310/numpy-2d-boolean-array-count-consecutive-true-sizes
+    labeled, clusters = mnts.label(arr)
+    sizes = mnts.sum(arr, labeled, index=range(clusters + 1))
+    return sizes.astype(int)[1:]

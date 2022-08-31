@@ -29,14 +29,14 @@ def create_heatmaps(df, model_params, create_D_A_heatmap=True, D_A_grid=np.logsp
 
     if create_D_A_heatmap:
         print("Creating heatmap for D, A:")
-        D_arr = D_A_grid * model_params['D']
-        A_arr = D_A_grid * model_params['A']
+        D_arr = D_A_grid * model_params.D
+        A_arr = D_A_grid * model_params.A
         L_mat_D_A = np.zeros([len(D_arr), len(A_arr)])
         for n, D_iter in enumerate(D_arr):
             for m, A_iter in enumerate(A_arr):
                 L_mat_D_A[n, m] = bayesianTools.multiple_trajectories_likelihood(X_arr_list, dt_list,
-                                                                                 model_params['T_stick'],
-                                                                                 model_params['T_unstick'],
+                                                                                 model_params.T_stick,
+                                                                                 model_params.T_unstick,
                                                                                  D_iter, A_iter,
                                                                                  is_parallel=True)
 
@@ -47,14 +47,14 @@ def create_heatmaps(df, model_params, create_D_A_heatmap=True, D_A_grid=np.logsp
 
     if create_T1_T2_heatmap:
         print("Creating heatmap for T_stick,T_unstick:")
-        T1_arr = T1_T2_grid * model_params['T_stick']
-        T2_arr = T1_T2_grid * model_params['T_unstick']
+        T1_arr = T1_T2_grid * model_params.T_stick
+        T2_arr = T1_T2_grid * model_params.T_unstick
         L_mat_T1_T2 = np.zeros([len(T1_arr), len(T2_arr)])
         for n, T1_iter in enumerate(T1_arr):
             for m, T2_iter in enumerate(T2_arr):
                 L_mat_T1_T2[n, m] = bayesianTools.multiple_trajectories_likelihood(X_arr_list, dt_list, T1_iter,
-                                                                                   T2_iter, model_params['D'],
-                                                                                   model_params['A'],
+                                                                                   T2_iter, model_params.D,
+                                                                                   model_params.A,
                                                                                    is_parallel=True)
 
                 print([n, m])
@@ -64,7 +64,7 @@ def create_heatmaps(df, model_params, create_D_A_heatmap=True, D_A_grid=np.logsp
     print("Done with heatmaps!")
 
 
-def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphics=True):
+def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphics=True, saveFiles=True):
     N_particle = len(df.particle.unique())
 
     if do_graphics and (N_particle > max_particles):
@@ -83,8 +83,7 @@ def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphi
     for i, particle_id in enumerate(particle_iter_array):
         X_arr = X_arr_list[particle_id]
         N_steps = len(X_arr)
-        S, XT, L_est = bayesianTools.viterbi_algorithm(X_arr, model_params['T_stick'], model_params['T_unstick'],
-                                                       model_params['D'], model_params['A'], dt_list[i], True)
+        S, XT, L_est = bayesianTools.viterbi_algorithm(X_arr, model_params, True)
         # fullState = [[S[j], X_arr[j], XT[j]] for j in range(N_steps)]
 
         S_true = df[df.particle == particle_id].state.values
@@ -104,33 +103,69 @@ def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphi
             ax[n, m].plot(np.arange(N_steps), S, '--')
             ax[n, m].set_title("Accuracy: {}%".format(np.round(100 * accuracy_arr[i], 1)))
 
-    if do_graphics:
-        plt.tight_layout()
-        save_string_fig = "true_vitrebi_comparison.png"
-        backup_before_save(save_string_fig)
-        plt.savefig(save_string_fig, dpi=400)
-    save_string_accuracy = "true_vitrebi_accuracy_arr.npy"
-    backup_before_save(save_string_accuracy)
-    np.save(save_string_accuracy, [accuracy_arr, particle_iter_array, df])
+    if saveFiles:
+        if do_graphics:
+            plt.tight_layout()
+            save_string_fig = "true_vitrebi_comparison.png"
+            backup_before_save(save_string_fig)
+            plt.savefig(save_string_fig, dpi=400)
+        save_string_accuracy = "true_vitrebi_accuracy_arr.npy"
+        backup_before_save(save_string_accuracy)
+        np.save(save_string_accuracy, [accuracy_arr, particle_iter_array, df])
 
 
-def find_est_T1_T2_as_function_of_guess_T1_T2(df, model_params):
-    D = model_params['D']
-    A = model_params['A']
-    T1_true = model_params['T_stick']
-    T2_true = model_params['T_unstick']
+def find_est_T1_T2_as_function_of_guess_T1_T2(df, model_params, T1_T2_grid=np.logspace(-1., 3., 21)):
+    D = model_params.D
+    A = model_params.A
+    dt = model_params.dt
+    T1_true = model_params.T_stick
+    T2_true = model_params.T_unstick
 
     particle_iter_array = df.particle.unique()
+    N_particles = len(particle_iter_array)
 
     X_arr_list = bayesianTools.extract_X_arr_list_from_df(df)
     dt_list = bayesianTools.extract_dt_list_from_df(df)
 
-    for i, particle_id in enumerate(particle_iter_array):
-        X_arr = X_arr_list[particle_id]
-        N_steps = len(X_arr)
-        S, XT, L_est = bayesianTools.viterbi_algorithm(X_arr, model_params['T_stick'], model_params['T_unstick'],
-                                                       model_params['D'], model_params['A'], dt_list[i], True)
+    T1_guess_arr = T1_T2_grid * T1_true
+    T2_guess_arr = T1_T2_grid * T1_true
 
-        dt = dt_list[i][0]
-        T1_est = dt * arr_of_length_of_true_segments(1 - S)
-        T2_est = dt * arr_of_length_of_true_segments(S)
+    T1_est_mat = np.zeros((len(T1_guess_arr), len(T2_guess_arr), 2))
+    T2_est_mat = np.zeros(T1_est_mat.shape)
+
+    for n, T1_guess in enumerate(T1_guess_arr):
+        for m, T2_guess in enumerate(T2_guess_arr):
+            T1_list_arr = np.zeros(N_particles, dtype=object)
+            T2_list_arr = np.zeros(N_particles, dtype=object)
+            for i, particle_id in enumerate(particle_iter_array):
+                X_arr = X_arr_list[particle_id]
+                # N_steps = len(X_arr)
+                model_params_for_viterbi = model.pack_model_params(T1_guess, T2_guess, D, A, dt)
+                S, XT, L_est = bayesianTools.viterbi_algorithm(X_arr, model_params_for_viterbi, True)
+
+                dt = dt_list[i][0]
+                T1_list_arr[i] = (dt * arr_of_length_of_true_segments(S == 0))
+                T2_list_arr[i] = (dt * arr_of_length_of_true_segments(S != 0))
+
+                # remove edges
+                if S[0] == 0:
+                    T1_list_arr = T1_list_arr[1:]
+                else:
+                    T2_list_arr = T2_list_arr[1:]
+
+                if S[-1] == 0:
+                    T1_list_arr = T1_list_arr[:-1]
+                else:
+                    T2_list_arr = T2_list_arr[:-1]
+
+            T1_arr = np.hstack(T1_list_arr)
+            T2_arr = np.hstack(T2_list_arr)
+
+            T1_est_mat[n, m, 0] = np.mean(T1_arr)
+            T1_est_mat[n, m, 1] = np.std(T1_arr)
+            T2_est_mat[n, m, 0] = np.mean(T2_arr)
+            T2_est_mat[n, m, 1] = np.std(T2_arr)
+
+    save_string = "T1_T2_mat_T1_T2_arr.npy"
+    backup_before_save(save_string)
+    np.save([T1_est_mat, T2_est_mat, T1_guess_arr, T2_guess_arr])

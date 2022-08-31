@@ -1,43 +1,47 @@
 import numpy as np
 from numpy import random
 from model_utils import GenerationMode
+from collections import namedtuple
+import numba
+
+Params = namedtuple('Params',
+                    ['T_stick', 'T_unstick', 'D', 'A', 'dt',
+                     'MSD', 'log_pi_MSD', 'inertia_factor', 'modified_2A', 'log_pi_modified_2A',
+                     'log_stay_free', 'log_stick', 'log_unstick', 'log_stay_stuck'])
 
 
 def pack_model_params(T_stick: float, T_unstick: float, D: float, A: float, dt: float):
     """
-    Pack a dict containing all the model parameters, and also all the derived parameters used for the calculation
+    Pack a namedtuple containing all the model parameters, and also all the derived parameters used for the calculation
     (e.g. calculate the log of some parameters here ones, instead of computing log each time)
+    This is namedtuple instead of dict for compatibility with numba
+    (see https://stackoverflow.com/questions/46003172/replacement-of-dict-type-for-numba-as-parameters-of-a-python-function)
     """
     d = 2  # dimension
     MSD = 4 * D * dt  # comment: this is not really MSD in dimensions other than 2 - true MSD is (d/2) * 4*D*dt
     r = 1. / T_stick + 1. / T_unstick  # combined rate
-    phi = np.exp(-r * dt)
 
     inertia_factor = np.exp(-D * dt / A)
     modified_2A = 2 * A * (1 - inertia_factor ** 2)
 
-    # include the 4 model params and the delta t for convenience in tests
-    model_params = {
-        'D': D,
-        'A': A,
-        'T_stick': T_stick,
-        'T_unstick': T_unstick,
-        'dt': dt,
-        'MSD': MSD,
-        'log_pi_MSD': 0.5 * d * np.log(np.pi * MSD),
-        'modified_2A': modified_2A,
-        'log_pi_modified_2A': 0.5 * d * np.log(np.pi * modified_2A),
-        'inertia_factor': inertia_factor,
-        # These are valid only if dt<<T_stick,T_unstick
-        'log_stay_free': np.log((T_stick + T_unstick * phi) / (T_stick + T_unstick)),
-        'log_stay_stuck': np.log((T_unstick + T_stick * phi) / (T_stick + T_unstick)),
-        'log_stick': np.log((T_unstick * (1 - phi)) / (T_stick + T_unstick)),
-        'log_unstick': np.log((T_stick * (1 - phi)) / (T_stick + T_unstick)),
-    }
+    log_pi_MSD = 0.5 * d * np.log(np.pi * MSD)
+    log_pi_modified_2A = 0.5 * d * np.log(np.pi * modified_2A)
+
+    phi = np.exp(-r * dt)
+    log_stay_free = np.log((T_stick + T_unstick * phi) / (T_stick + T_unstick))
+    log_stay_stuck = np.log((T_unstick + T_stick * phi) / (T_stick + T_unstick))
+    log_stick = np.log((T_unstick * (1 - phi)) / (T_stick + T_unstick))
+    log_unstick = np.log((T_stick * (1 - phi)) / (T_stick + T_unstick))
+
+    model_params = Params(T_stick, T_unstick, D, A, dt,
+                          MSD, log_pi_MSD, inertia_factor, modified_2A, log_pi_modified_2A,
+                          log_stay_free, log_stick, log_unstick, log_stay_stuck)
+
     return model_params
 
 
-def model_transition_log_probability(S_prev: int, S_curr: int, X_prev, X_curr, X_tether_prev, model_params: dict):
+@numba.jit(nopython=True)
+def model_transition_log_probability(S_prev, S_curr, X_prev, X_curr, X_tether_prev, model_params):
     """
     Calculate the log of probability of transition from one state to another, when they are separated by time dt, using
     the model parameters. In essence this incorporates all the model information.
@@ -75,23 +79,19 @@ def model_transition_log_probability(S_prev: int, S_curr: int, X_prev, X_curr, X
         summation_ax_free = 0
     else:
         summation_ax_free = 1
-    spatial_free = - np.sum(dX_free ** 2, axis=summation_ax_free) / model_params['MSD'] - model_params['log_pi_MSD']
+    spatial_free = - np.sum(dX_free ** 2, axis=summation_ax_free) / model_params.MSD - model_params.log_pi_MSD
 
-    dX_stuck = (X_curr - X_tether_prev) - model_params['inertia_factor'] * (X_prev - X_tether_prev)
+    dX_stuck = (X_curr - X_tether_prev) - model_params.inertia_factor * (X_prev - X_tether_prev)
     if len(dX_stuck.shape) == 1:
         summation_ax_stuck = 0
     else:
         summation_ax_stuck = 1
-    spatial_stuck = - np.sum((dX_stuck) ** 2, axis=summation_ax_stuck) / (model_params['modified_2A']) - model_params[
-        'log_pi_modified_2A']
-
-    # print(f"dX_free.shape:{dX_free.shape} , summation_ax_free:{summation_ax_free},sum:{np.sum(dX_free ** 2, axis=summation_ax_free)}")
-    # print(
-    #     f"dX_stuck.shape:{dX_stuck.shape} , summation_ax_stuck:{summation_ax_stuck},sum:{np.sum(dX_stuck ** 2, axis=summation_ax_stuck)}")
+    spatial_stuck = - np.sum((dX_stuck) ** 2, axis=summation_ax_stuck) / (
+        model_params.modified_2A) - model_params.log_pi_modified_2A
 
     spatial = prev_free * spatial_free + prev_stuck * spatial_stuck
-    temporal = prev_free * (curr_free * model_params['log_stay_free'] + curr_stuck * model_params['log_stick']) + \
-               prev_stuck * (curr_free * model_params['log_unstick'] + curr_stuck * model_params['log_stay_stuck'])
+    temporal = prev_free * (curr_free * model_params.log_stay_free + curr_stuck * model_params.log_stick) + \
+               prev_stuck * (curr_free * model_params.log_unstick + curr_stuck * model_params.log_stay_stuck)
     L = spatial + temporal
 
     return L
@@ -163,10 +163,10 @@ def model_generate_trajectories(N_steps: int, N_particle: int, init_S, model_par
     P = np.zeros([2, 2])
     if generation_mode == GenerationMode.DONT_FORCE:
         # note: this is valid only when dt<<T_stick,T_unstick
-        P[0, 0] = np.exp(model_params["log_stay_free"])
-        P[0, 1] = np.exp(model_params["log_stick"])
-        P[1, 0] = np.exp(model_params["log_unstick"])
-        P[1, 1] = np.exp(model_params["log_stay_stuck"])
+        P[0, 0] = np.exp(model_params.log_stay_free)
+        P[0, 1] = np.exp(model_params.log_stick)
+        P[1, 0] = np.exp(model_params.log_unstick)
+        P[1, 1] = np.exp(model_params.log_stay_stuck)
     if generation_mode == GenerationMode.FORCE_FREE:
         P[:, 0] = 0.
         P[:, 1] = 1.
@@ -185,7 +185,7 @@ def model_generate_trajectories(N_steps: int, N_particle: int, init_S, model_par
 
     # for clarity X_tether is initialized only for stuck
     X_tether_arr[np.where(init_state_arr == 1.), 0, :] = reduce_tethering_range * np.sqrt(
-        0.5 * model_params['modified_2A']) * gaussian_Stream[np.where(init_state_arr == 1.), 0, :]
+        0.5 * model_params.modified_2A) * gaussian_Stream[np.where(init_state_arr == 1.), 0, :]
 
     for n in range(1, N_steps):
         free_inds = np.where(states_arr[:, n - 1] == 0.)[0]
@@ -193,13 +193,13 @@ def model_generate_trajectories(N_steps: int, N_particle: int, init_S, model_par
 
         # Free particles diffuse
         X_arr[free_inds, n, :] = X_arr[free_inds, n - 1, :] + \
-                                 np.sqrt(0.5 * model_params['MSD']) * gaussian_Stream[free_inds, n, :]
+                                 np.sqrt(0.5 * model_params.MSD) * gaussian_Stream[free_inds, n, :]
         X_tether_arr[free_inds, n, :] = np.nan
         # Stuck particles wiggle
 
-        X_arr[stuck_inds, n, :] = X_tether_arr[stuck_inds, n - 1, :] * (1 - model_params['inertia_factor']) + \
-                                  X_arr[stuck_inds, n - 1, :] * model_params['inertia_factor'] + \
-                                  np.sqrt(0.5 * model_params['modified_2A']) * gaussian_Stream[stuck_inds, n, :]
+        X_arr[stuck_inds, n, :] = X_tether_arr[stuck_inds, n - 1, :] * (1 - model_params.inertia_factor) + \
+                                  X_arr[stuck_inds, n - 1, :] * model_params.inertia_factor + \
+                                  np.sqrt(0.5 * model_params.modified_2A) * gaussian_Stream[stuck_inds, n, :]
 
         # Tether point continues UNLESS going to stick
         X_tether_arr[:, n, :] = X_tether_arr[:, n - 1, :]
@@ -216,7 +216,7 @@ def model_generate_trajectories(N_steps: int, N_particle: int, init_S, model_par
         # Sticking particles tether to a point
         X_tether_arr[sticking_inds, n, :] = X_arr[sticking_inds, n, :] + \
                                             reduce_tethering_range * \
-                                            np.sqrt(0.5 * model_params['modified_2A']) * \
+                                            np.sqrt(0.5 * model_params.modified_2A) * \
                                             extra_gaussian_Stream[sticking_inds, n, :]
 
     return states_arr, X_arr, X_tether_arr

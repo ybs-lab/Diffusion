@@ -1,6 +1,8 @@
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
+
+import model
 from config import MAX_PROCESSORS_LIMIT, MAX_AVAILABLE_STATES_TO_KEEP, FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO
 from model import model_transition_log_probability, pack_model_params
 import numba
@@ -219,3 +221,79 @@ def multiple_trajectories_likelihood(X_arr_list, dt_list, T_stick: float, T_unst
             L_arr[n] = L
 
     return np.sum(L_arr / length_arr) / N_particles
+
+
+def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: float, D: float, A: float,
+                        is_parallel=False):
+    """
+    Args:
+        X_arr_list (Nx1 list of matrices): list of the observed positions of all particles - each element of the list is
+        an [Mx2] ndarray of the observed positions, where M is the specific particle's trajectory length.
+        dt_list (Nx1 ndarray): list of the time interval for the sampling for each particle.
+        T_stick : model paramaeter
+        T_unstick: model parameter
+        D: model parameter
+        A: model parameter
+        is_parallel: parallelized computing for all particles (should be True unless the optimization function calling
+        this is already parallelized)
+
+    Returns:
+        AA
+    """
+
+    N_particles = len(dt_list)
+    max_iterations = 100
+    L_by_iter = np.zeros(max_iterations)
+    params_by_iter = np.zeros([max_iterations + 1, 4])
+    L_arr = np.zeros(N_particles)  # log likelihood array
+    S_arr_list = np.empty(N_particles, dtype=object)
+    X_tether_arr_list = np.empty(N_particles, dtype=object)
+    length_arr = np.asarray([len(X_arr) for X_arr in X_arr_list])  # trajectory length array
+
+    dt = np.mean(dt_list)  # TODO: FIX THIS!!
+    initial_parameters = np.asarray([T_stick, T_unstick, D, A])  # for documentation
+    params_by_iter[0, :] = initial_parameters
+    prev_parameters = np.asarray([T_stick, T_unstick, D, A])  # for documentation
+    model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
+
+    for iter in range(max_iterations):
+        # E step - find trajectories
+        print("Iteration {} - E step".format(iter))
+        if is_parallel:
+            with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
+                for n, output in enumerate(
+                        executor.map(viterbi_algorithm, X_arr_list, repeat(model_params), repeat(True)
+                                     )):
+                    S_arr_list[n] = output[0]
+                    X_tether_arr_list[n] = output[1]
+                    L_arr[n] = output[2]
+        else:
+            for n in range(N_particles):
+                output = viterbi_algorithm(X_arr_list[n], model_params,
+                                           do_backprop=True)
+                S_arr_list[n] = output[0]
+                X_tether_arr_list[n] = output[1]
+                L_arr[n] = output[2]
+
+        L_by_iter[iter] = np.sum(L_arr)
+        # M step - find the parameters
+        print("Iteration {} - M step".format(iter))
+        params_mat = np.zeros([N_particles, 4])
+        for n in range(N_particles):
+            params_mat[n, :] = model.model_get_optimal_parameters(
+                dt_list[n], S_arr_list[n], X_arr_list[n], X_tether_arr_list[n])
+        params_mat[~np.isfinite(params_mat)] = np.nan
+        params_est = np.nanmean(params_mat, axis=0)
+        params_est[~np.isfinite(params_est)] = prev_parameters[~np.isfinite(params_est)]
+        prev_parameters = params_est.copy()
+        T_stick, T_unstick, D, A = params_est
+        model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
+        params_by_iter[iter + 1, :] = params_est
+
+        if (iter > 0) and (np.abs(L_by_iter[iter]- L_by_iter[iter - 1])/(np.abs(L_by_iter[iter])+np.abs(L_by_iter[iter-1])))<1e-10:
+            break
+
+    params_by_iter = params_by_iter[:(iter + 1), :]
+    L_by_iter = L_by_iter[:iter]
+
+    return params_by_iter, L_by_iter,S_arr_list,X_tether_arr_list

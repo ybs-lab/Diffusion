@@ -97,30 +97,6 @@ def model_transition_log_probability(S_prev, S_curr, X_prev, X_curr, X_tether_pr
     return L
 
 
-#
-#
-# if S_prev == 0:
-#     # Start as free
-#     spatial = - np.sum((X_curr - X_prev) ** 2, axis=1) / model_params['MSD'] - model_params['log_pi_MSD']
-#     if S_curr == 0:
-#         # free -> free
-#         temporal = model_params['log_stay_free']
-#     else:
-#         # free -> stuck
-#         temporal = model_params['log_stick']
-# else:
-#     # Start as stuck
-#     spatial = - np.sum(
-#         ((X_curr - X_tether_prev) - model_params['inertia_factor'] * (X_prev - X_tether_prev)) ** 2, axis=1) / (
-#                   model_params['modified_2A']) - model_params['log_pi_modified_2A']
-#     if S_curr == 0:
-#         # stuck -> free
-#         temporal = model_params['log_unstick']
-#     else:
-#         # #stuck -> stuck
-#         temporal = model_params['log_stay_stuck']
-
-
 def model_generate_trajectories(N_steps: int, N_particle: int, init_S, model_params: dict,
                                 generation_mode=GenerationMode.DONT_FORCE):
     """
@@ -245,3 +221,61 @@ def model_trajectory_log_probability(S_arr, X_arr, model_params: dict):
             X_tether = X_arr[n]
 
     return L
+
+
+def model_get_optimal_parameters(dt, S_arr, X_arr, X_tether_arr=None):
+    """
+    Calculate the most likely model parameters given a full trajectory
+
+    Args:
+        dt (float): time interval
+        S_arr (Nx1 int): list of states - 0 is free, 1 is stuck
+        X_arr (Nx2 float): list of particle positions
+        X_tether_arr (Nx2 float): list of particle tether positions. optional argument (can be derived from the others)
+
+    Returns:
+        4x1 array of model parameters [T_stick,T_unstick,D,A]
+    """
+    if np.prod(S_arr == 0) == 1:
+        T_stick_est = np.inf
+        T_unstick_est = np.nan
+        D_est = np.mean(np.sum((X_arr[1:, :] - X_arr[:-1, :]) ** 2, axis=1)) / (4 * dt)
+        A_est = np.nan
+    elif np.prod(S_arr != 0) == 1:
+        T_stick_est = np.inf
+        T_unstick_est = np.nan
+        D_est = np.nan
+        A_est = np.nanmean(np.sum((X_arr[1:, :] - X_tether_arr[:-1, :]) ** 2, axis=1)) / (2)
+    else:
+        N = len(S_arr)
+        if X_tether_arr is None:
+            X_tether_arr = np.zeros([N, 2])
+            X_tether_arr[0, :] = X_arr[0]
+            for n in range(1, N):
+                if (S_arr[n - 1] == 0) and (S_arr[n] != 0):
+                    X_tether_arr[n, :] = X_arr[n]
+                else:
+                    X_tether_arr[n, :] = X_tether_arr[n - 1, :]
+
+        mask_free_to_free = (S_arr[:-1] == 0) * (S_arr[1:] == 0)
+        mask_free_to_stuck = (S_arr[:-1] == 0) * (S_arr[1:] != 0)
+        mask_stuck_to_free = (S_arr[:-1] != 0) * (S_arr[1:] == 0)
+        mask_stuck_to_stuck = (S_arr[:-1] != 0) * (S_arr[1:] != 0)
+
+        mask_free = mask_free_to_free + mask_free_to_stuck
+        mask_stuck = mask_stuck_to_free + mask_stuck_to_stuck
+
+        #wrapped with if because of pesky warnings
+        if np.sum(mask_free_to_stuck)>0:
+            T_stick_est = (np.sum(mask_free_to_free) / np.sum(mask_free_to_stuck) + 1) * dt
+        else:
+            T_stick_est = np.inf
+        if np.sum(mask_stuck_to_free)>0:
+            T_unstick_est = (np.sum(mask_stuck_to_stuck) / np.sum(mask_stuck_to_free) + 1) * dt
+        else:
+            T_unstick_est = np.inf
+        D_est = np.sum((mask_free * np.sum((X_arr[1:, :] - X_arr[:-1, :]) ** 2, axis=1))) / (4 * dt) / np.sum(mask_free)
+        A_est = np.nansum((mask_stuck * np.sum((X_arr[1:, :] - X_tether_arr[:-1, :]) ** 2, axis=1))) / 2 / np.sum(
+            mask_stuck)
+
+    return np.asarray([T_stick_est, T_unstick_est, D_est, A_est])

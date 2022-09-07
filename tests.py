@@ -5,6 +5,7 @@ from model_utils import GenerationMode
 import model
 import bayesianTools
 from utils import backup_before_save, arr_of_length_of_true_segments
+import time
 
 
 def generateSynthTrajs(N_steps, N_particle, dt, T_stick, T_unstick, D, A):
@@ -169,3 +170,18 @@ def find_est_T1_T2_as_function_of_guess_T1_T2(df, model_params, T1_T2_grid=np.lo
     save_string = "T1_T2_mat_T1_T2_arr.npy"
     backup_before_save(save_string)
     np.save([T1_est_mat, T2_est_mat, T1_guess_arr, T2_guess_arr])
+
+
+def test_em_viterbi(x0, x_true, X_arr_list, dt_list,is_parallel=False,save_files=False):
+    t = time.time()
+    output = bayesianTools.em_viterbi_optimization(X_arr_list, dt_list, x0[0], x0[1], x0[2], x0[3], is_parallel=is_parallel)
+
+    if save_files:
+        save_string = "EM_output.npy"
+        backup_before_save(save_string)
+        np.save(save_string, output)
+    x_res = output[0][-1, :]
+    print(f"x_res={x_res} ; x0 = {x0} ; x_true={x_true}")
+    print("ratio is {}".format(x_res / x_true))
+    print("original ratio is {}".format(x0 / x_true))
+    print("This took overall {} sec".format(time.time() - t))

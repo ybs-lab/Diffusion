@@ -191,3 +191,11 @@ def arr_of_length_of_true_segments(arr):
     labeled, clusters = mnts.label(arr)
     sizes = mnts.sum(arr, labeled, index=range(clusters + 1))
     return sizes.astype(int)[1:]
+
+
+def accuracy_of_hidden_paths(S, S_true, XT, XT_true):
+    N = len(S_true)
+    XT = np.reshape(XT, [N, 2])
+    XT_true = np.reshape(XT_true, [N, 2])
+    accuracy = np.sum((S_true == S) * ((S == 0) + (S == 1) * np.prod(np.isclose(XT, XT_true, rtol=1e-05, atol=1e-08, equal_nan=True),
+                                                   axis=1))) / float(N)

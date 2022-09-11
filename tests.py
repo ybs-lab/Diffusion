@@ -4,7 +4,7 @@ from importData import generate_diffuse_tether_trajectories
 from model_utils import GenerationMode
 import model
 import bayesianTools
-from utils import backup_before_save, arr_of_length_of_true_segments
+from utils import backup_before_save, arr_of_length_of_true_segments,accuracy_of_hidden_paths
 import time
 
 
@@ -65,7 +65,7 @@ def create_heatmaps(df, model_params, create_D_A_heatmap=True, D_A_grid=np.logsp
     print("Done with heatmaps!")
 
 
-def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphics=True, saveFiles=True):
+def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphics=True, save_files=True):
     N_particle = len(df.particle.unique())
 
     if do_graphics and (N_particle > max_particles):
@@ -92,11 +92,7 @@ def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphi
 
         # fullState_true = [[S_true[j], X_arr[j], XT_true[j]] for j in range(N_steps)]
         # L_tru = model.model_trajectory_log_probability(S_true, X_arr, model_params)
-        accuracy_arr[i] = np.sum(
-            (S_true == S) * (
-                    (S == 0) + (S == 1) * np.prod(np.isclose(XT, XT_true, rtol=1e-05, atol=1e-08, equal_nan=True),
-                                                  axis=1))) / float(
-            N_steps)
+        accuracy_arr[i] = accuracy_of_hidden_paths(S,S_true,XT,XT_true)
         if do_graphics:
             n = i % N_rows
             m = int(i / N_rows)
@@ -104,7 +100,7 @@ def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphi
             ax[n, m].plot(np.arange(N_steps), S, '--')
             ax[n, m].set_title("Accuracy: {}%".format(np.round(100 * accuracy_arr[i], 1)))
 
-    if saveFiles:
+    if save_files:
         if do_graphics:
             plt.tight_layout()
             save_string_fig = "true_vitrebi_comparison.png"
@@ -172,16 +168,22 @@ def find_est_T1_T2_as_function_of_guess_T1_T2(df, model_params, T1_T2_grid=np.lo
     np.save([T1_est_mat, T2_est_mat, T1_guess_arr, T2_guess_arr])
 
 
-def test_em_viterbi(x0, x_true, X_arr_list, dt_list,is_parallel=False,save_files=False):
+def test_em_viterbi(x0, x_true, X_arr_list, dt_list, is_parallel=False, save_files=False, verbose=False):
     t = time.time()
-    output = bayesianTools.em_viterbi_optimization(X_arr_list, dt_list, x0[0], x0[1], x0[2], x0[3], is_parallel=is_parallel)
+    output = bayesianTools.em_viterbi_optimization(X_arr_list, dt_list, x0[0], x0[1], x0[2], x0[3],
+                                                   is_parallel=is_parallel, verbose=verbose)
 
     if save_files:
         save_string = "EM_output.npy"
         backup_before_save(save_string)
         np.save(save_string, output)
     x_res = output[0][-1, :]
-    print(f"x_res={x_res} ; x0 = {x0} ; x_true={x_true}")
-    print("ratio is {}".format(x_res / x_true))
-    print("original ratio is {}".format(x0 / x_true))
-    print("This took overall {} sec".format(time.time() - t))
+    L_by_iter = output[1]
+    S_arr_list = output[2]
+    X_tether_arr_list=output[3]
+    if verbose:
+        print(f"x_res={x_res} ; x0 = {x0} ; x_true={x_true}")
+        print("ratio is {}".format(x_res / x_true))
+        print("original ratio is {}".format(x0 / x_true))
+        print("This took overall {} sec".format(time.time() - t))
+    return x_res,L_by_iter,S_arr_list,X_tether_arr_list

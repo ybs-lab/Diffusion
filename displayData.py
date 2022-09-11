@@ -19,7 +19,7 @@ from config import OUTPUTS_DIR, IMG4VID_DIR
 
 
 def plot_MSD(df, lagtime=np.arange(1, 1000, step=5), group_by="experiment", logscale=True, ax="New",
-             saveFiles=False, filename="myMSD", eqParticleWeight=True, lagTimeInFrames=False, isdfPadded=True,
+             save_files=False, filename="myMSD", eqParticleWeight=True, lagTimeInFrames=False, isdfPadded=True,
              **kwargs):
     group_keys = df[group_by].unique()
     gb = df.groupby(group_by)
@@ -91,7 +91,7 @@ def plot_MSD(df, lagtime=np.arange(1, 1000, step=5), group_by="experiment", logs
     plt.setp(ax.get_legend().get_title(), fontsize='8')  # for legend title
     plt.grid()
 
-    if saveFiles:
+    if save_files:
         filepath = os.path.join(OUTPUTS_DIR, filename + ".png")
         backup_before_save(filepath)
         plt.savefig(filepath, format="png", dpi=400)
@@ -573,7 +573,7 @@ def create_video(path='.', fps=4.0, output_name="myvideo", image_type="png"):
 
 
 def animate_trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin=True, preStr="traj",
-                         video_name="traj_video", gif_name="traj_gif", showFigure=False, saveFiles=True,
+                         video_name="traj_video", gif_name="traj_gif", showFigure=False, save_files=True,
                          dispLegend=False, doneTrajNoMarker=True, fps=0., axForVelocityPlot=[],
                          particlesForFixedColoring=[], curParticlePivotSize=0.):
     files_path = IMG4VID_DIR
@@ -602,10 +602,10 @@ def animate_trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
         filename = files_path + f'{preStr}{i:04d}.png'
         filenames.append(filename)
         # save frame
-        if saveFiles:
+        if save_files:
             plt.savefig(filename, format="png", dpi=400)
 
-    if saveFiles:
+    if save_files:
         create_video(path=files_path, fps=20.0, output_name=os.path.join(OUTPUTS_DIR, video_name), image_type="png")
         create_gif(path=files_path, buffer=5, output_name=(OUTPUTS_DIR, gif_name), image_type="png")
         for f in os.listdir(files_path):
@@ -615,7 +615,7 @@ def animate_trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
 def animate_G_dx_dt(df, d_array=np.arange(1, 101), group_by="experiment", x="xy", kind="kde", video_name="myvideo",
                     gif_name="mygif", isdfPadded=False,
                     var_name="myvar", preStr="", compare_conv=False, xlim=20., ylim=[1e-6, 1.], semilogscale=True,
-                    saveFiles=True, showFigures=False, **kwargs):
+                    save_files=True, showFigures=False, **kwargs):
     # Create gif and mp4 and variance plot of G(delta x/y, delta t)
     # Inputs:  1. dataframe
     #          2. d_array - delta t array in frame units
@@ -709,7 +709,7 @@ def animate_G_dx_dt(df, d_array=np.arange(1, 101), group_by="experiment", x="xy"
         # create file name and append it to a list
         filename = files_path + f'{i:04d}.png'
         filenames.append(filename)
-        if saveFiles:
+        if save_files:
             # save frame
             plt.savefig(filename, format="png", dpi=400)
             # plt.savefig("./for_latex/" + f'{preStr}{i}.png', format="png", dpi=400)
@@ -720,7 +720,7 @@ def animate_G_dx_dt(df, d_array=np.arange(1, 101), group_by="experiment", x="xy"
             elif i > 20:
                 stats_df = stats_df.append(cur_stats_df)
 
-    if saveFiles:
+    if save_files:
         create_video(path=files_path, fps=6.0, output_name=os.path.join(OUTPUTS_DIR, video_name), image_type="png")
         # create_gif(path=files_path, buffer=5, output_name="./files/" + gif_name, image_type="png")
         for f in os.listdir(files_path):
@@ -791,7 +791,7 @@ def trajAxesLimits(df, startAtOrigin):
 
 
 def state_times_histogram(df=pd.DataFrame([]), times_df=pd.DataFrame([]), kind="kde", eqWeightParticles=True,
-                        log_scale=True, ax=[], saveFiles=False):
+                        log_scale=True, ax=[], save_files=False):
     if times_df.empty:  # create times_df from the normal input df
         experiments = df.experiment.unique()
         gb_exp = df.groupby("experiment")
@@ -883,7 +883,7 @@ def state_times_histogram(df=pd.DataFrame([]), times_df=pd.DataFrame([]), kind="
             kp = sns.histplot(data=times_df, x="t", hue="experiment+state",
                               common_norm=False, stat="density", log_scale=[log_scale, log_scale], ax=ax)
 
-    if saveFiles:
+    if save_files:
         filepath = OUTPUTS_DIR + "/times_df.fea"
         backup_before_save(filepath)
         times_df.to_feather(filepath)
@@ -897,7 +897,7 @@ def quick_traj(df, N_particles=1, t_end_array=np.arange(0, 101), ):
     ax = plt.gca()
     print("Mean dr^2: " + str(small_df.dr2.dropna().mean()))
     plot_MSD(small_df, lagtime=np.asarray([1., 2., 5., 10., 50.]), group_by="particle", ax=ax)
-    animate_G_dx_dt(small_df, d_array=t_end_array, showFigures=False, saveFiles=False, group_by="particle")
+    animate_G_dx_dt(small_df, d_array=t_end_array, showFigures=False, save_files=False, group_by="particle")
     ax = plt.gca()
     ax.set_xlim([-15, 15])
     # ax.set_yscale("log")
@@ -910,7 +910,7 @@ def quick_traj(df, N_particles=1, t_end_array=np.arange(0, 101), ):
     print("Mean dx,dy,dr2 correct: " + str(np.mean(np.abs(dx))) + ", " + str(np.mean(np.abs(dy))) + ", " + str(
         np.mean(dx ** 2 + dy ** 2)))
     animate_trajectories(small_df, showFigure=True, t_end_array=np.arange(0, 101),
-                         saveFiles=False, dispLegend=True)
+                         save_files=False, dispLegend=True)
     plt.show()
 
 

@@ -1,10 +1,10 @@
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
+import scipy
 
-import model
 from config import MAX_PROCESSORS_LIMIT, MAX_AVAILABLE_STATES_TO_KEEP, FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO
-from model import model_transition_log_probability, pack_model_params
+from model import model_transition_log_probability, pack_model_params, model_get_optimal_parameters
 import numba
 
 
@@ -224,7 +224,7 @@ def multiple_trajectories_likelihood(X_arr_list, dt_list, T_stick: float, T_unst
 
 
 def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: float, D: float, A: float,
-                        is_parallel=False):
+                            is_parallel=False, max_iterations=100,verbose=False):
     """
     Args:
         X_arr_list (Nx1 list of matrices): list of the observed positions of all particles - each element of the list is
@@ -236,13 +236,16 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
         A: model parameter
         is_parallel: parallelized computing for all particles (should be True unless the optimization function calling
         this is already parallelized)
+        max_iterations: maximal number of iterations (usually there is convergence after 5-6 iters and the loop stops)
 
     Returns:
-        AA
+        params_by_iter (N_iter x 4 ndarray): the 4 model parameters estimated per iteration
+        L_by_iter (N_iter x 1 ndarray): the likelihood of the parameters per iteration
+        S_arr_list (list of len N_particles): list that contains ndarray with array of the hidden variable S for each particle
+        X_tether_arr_list (list of len N_particles): list that contains ndarray with matrix of the hidden variable X_tether for each particle
     """
 
     N_particles = len(dt_list)
-    max_iterations = 100
     L_by_iter = np.zeros(max_iterations)
     params_by_iter = np.zeros([max_iterations + 1, 4])
     L_arr = np.zeros(N_particles)  # log likelihood array
@@ -258,7 +261,8 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
 
     for iter in range(max_iterations):
         # E step - find trajectories
-        print("Iteration {} - E step".format(iter))
+        if verbose:
+            print("Iteration {} - E step".format(iter))
         if is_parallel:
             with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
                 for n, output in enumerate(
@@ -277,10 +281,11 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
 
         L_by_iter[iter] = np.sum(L_arr)
         # M step - find the parameters
-        print("Iteration {} - M step".format(iter))
+        if verbose:
+            print("Iteration {} - M step".format(iter))
         params_mat = np.zeros([N_particles, 4])
         for n in range(N_particles):
-            params_mat[n, :] = model.model_get_optimal_parameters(
+            params_mat[n, :] = model_get_optimal_parameters(
                 dt_list[n], S_arr_list[n], X_arr_list[n], X_tether_arr_list[n])
         params_mat[~np.isfinite(params_mat)] = np.nan
         params_est = np.nanmean(params_mat, axis=0)
@@ -290,10 +295,122 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
         model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
         params_by_iter[iter + 1, :] = params_est
 
-        if (iter > 0) and (np.abs(L_by_iter[iter]- L_by_iter[iter - 1])/(np.abs(L_by_iter[iter])+np.abs(L_by_iter[iter-1])))<1e-10:
+        if (iter > 0) and (np.abs(L_by_iter[iter] - L_by_iter[iter - 1]) / (
+                np.abs(L_by_iter[iter]) + np.abs(L_by_iter[iter - 1]))) < 1e-10:
             break
 
     params_by_iter = params_by_iter[:(iter + 1), :]
     L_by_iter = L_by_iter[:iter]
 
-    return params_by_iter, L_by_iter,S_arr_list,X_tether_arr_list
+    return params_by_iter, L_by_iter, S_arr_list, X_tether_arr_list
+
+
+def generate_Q_matrix(N, model_params):
+    diag_arr = np.zeros(N + 1)
+    diag_arr[1:] = (1 - model_params.dt / model_params.T_unstick) / (np.pi * model_params.modified_2A)
+    diag_arr[0] = (1 - model_params.dt / model_params.T_stick) / (np.pi * model_params.MSD)
+    Q = scipy.sparse.diags(diag_arr, 0).tocsr()
+    Q[1:, 0] = (model_params.dt / model_params.T_unstick) / (np.pi * model_params.modified_2A)
+    Q.eliminate_zeros()
+    return Q
+
+
+def generate_P_matrix(X_arr, n, model_params, Q, N, return_grads=True):
+    # need n <= N-2
+    Q = Q.copy()
+    Q[0, n + 2] = (model_params.dt / model_params.T_stick) / (np.pi * model_params.MSD)
+
+    diag_arr = np.zeros(N + 1)
+    diag_arr[0] = -np.sum((X_arr[n + 1] - X_arr[n]) ** 2) / model_params.MSD
+    diag_arr[1:(n + 2)] = -np.sum((X_arr[n + 1] - X_arr[:(n + 1)]) ** 2, axis=1) / model_params.modified_2A
+    exp_diag_arr = diag_arr.copy()
+    exp_diag_arr[:(n + 2)] = np.exp(diag_arr[:(n + 2)])
+
+    P = scipy.sparse.diags(exp_diag_arr, 0) @ Q
+
+    # max_P = P.max()
+    # P = np.round(P / max_P, 10) * P
+
+    P.eliminate_zeros()
+
+    # #should i do this???????????
+    # for m in range(P.shape[0]):
+    #     P[m,:]/= P[m,:].sum()
+
+    if not return_grads:
+        return P
+
+    for_spatial_grads = scipy.sparse.diags(1 + diag_arr, 0) @ P
+    gradients_arr = [P.copy() if i <= 1 else for_spatial_grads.copy() for i in range(4)]
+
+    dt = model_params.dt
+
+    T_stick = model_params.T_stick
+    # T_stick
+    gradients_arr[0][1:, :] = 0
+    gradients_arr[0][0, 1:] /= -T_stick
+    gradients_arr[0][0, 0] /= (T_stick * (T_stick / dt - 1))
+
+    T_unstick = model_params.T_unstick
+    # T_unstick
+    gradients_arr[1][0, :] = 0
+    gradients_arr[1][1:, :] /= (T_unstick * (T_unstick / dt - 1))
+    gradients_arr[1][1:, 0] /= -T_unstick
+
+    D = model_params.D
+    modified_A = model_params.modified_2A / 2
+
+    # D
+    gradients_arr[2][0, :] *= (-1 / D)
+    gradients_arr[2][1:, :] *= -(model_params.d_A_tilde_d_D / modified_A)
+
+    # A
+    gradients_arr[3][0, :] *= 0
+    gradients_arr[3][1:, :] *= -(model_params.d_A_tilde_d_A / modified_A)
+
+    for i in range(4):
+        gradients_arr[i].eliminate_zeros()
+    return P, gradients_arr
+
+
+def matrix_gd_scheme(X_arr, model_params):
+    N = len(X_arr)
+    Q = generate_Q_matrix(N, model_params)
+
+    # pi_mat = scipy.sparse.coo_matrix(np.zeros([N, N + 1]), (N, N + 1)).tocsr()
+    grads_row_mat = [scipy.sparse.coo_matrix(np.zeros([N - 1, N + 1]), (N - 1, N + 1)).tocsr()
+                     for m in range(4)]
+    grads_arr = np.zeros([N - 1, 4])
+
+    # INITIAL CONDITION
+    pi = np.zeros([1, N + 1])
+    pi[:2] = 0.5
+
+    # END VECTOR
+    end_vector = np.ones([N + 1, 1])
+
+    log_L = 0.
+
+    for n in range(N - 1):
+        P, grads = generate_P_matrix(X_arr, n, model_params, Q, N)
+
+        # if n == 2:
+        #     print(P)
+        #     return 0, 0
+        for m in range(4):
+            grads_row_mat[m][n, :] = pi @ grads[m]
+        pi = pi @ P
+
+        pi_sum = np.sum(pi)
+        pi /= np.sum(pi)
+        log_L += np.log(pi_sum)
+
+    L = (pi @ end_vector)[0][0] * np.exp(log_L)
+    for n in np.flip(np.arange(N - 1, dtype=np.int32)):
+        for m in range(4):
+            grads_arr[n, m] = grads_row_mat[m][n, :] @ end_vector
+        P = generate_P_matrix(X_arr, n, model_params, Q, N, return_grads=False)
+        end_vector = P @ end_vector
+
+    gradients = np.sum(grads_arr, axis=0)
+    return L, gradients

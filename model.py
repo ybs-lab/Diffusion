@@ -4,10 +4,13 @@ from model_utils import GenerationMode
 from collections import namedtuple
 import numba
 
+
+#THIS HAS TO BE CONSISTENT WITH FUNCTION pack_model_params!
 Params = namedtuple('Params',
                     ['T_stick', 'T_unstick', 'D', 'A', 'dt',
                      'MSD', 'log_pi_MSD', 'inertia_factor', 'modified_2A', 'log_pi_modified_2A',
-                     'log_stay_free', 'log_stick', 'log_unstick', 'log_stay_stuck'])
+                     'log_stay_free', 'log_stick', 'log_unstick', 'log_stay_stuck',
+                     'd_A_tilde_d_D', 'd_A_tilde_d_A'])
 
 
 def pack_model_params(T_stick: float, T_unstick: float, D: float, A: float, dt: float):
@@ -33,9 +36,13 @@ def pack_model_params(T_stick: float, T_unstick: float, D: float, A: float, dt: 
     log_stick = np.log((T_unstick * (1 - phi)) / (T_stick + T_unstick))
     log_unstick = np.log((T_stick * (1 - phi)) / (T_stick + T_unstick))
 
+    d_A_tilde_d_D = 2 * dt * (1 - modified_2A / (2 * A))
+    d_A_tilde_d_A = (1 - MSD / (2 * A)) * modified_2A / (2 * A) - MSD / (2 * A)
+
     model_params = Params(T_stick, T_unstick, D, A, dt,
                           MSD, log_pi_MSD, inertia_factor, modified_2A, log_pi_modified_2A,
-                          log_stay_free, log_stick, log_unstick, log_stay_stuck)
+                          log_stay_free, log_stick, log_unstick, log_stay_stuck,
+                          d_A_tilde_d_D, d_A_tilde_d_A)
 
     return model_params
 
@@ -265,12 +272,12 @@ def model_get_optimal_parameters(dt, S_arr, X_arr, X_tether_arr=None):
         mask_free = mask_free_to_free + mask_free_to_stuck
         mask_stuck = mask_stuck_to_free + mask_stuck_to_stuck
 
-        #wrapped with if because of pesky warnings
-        if np.sum(mask_free_to_stuck)>0:
+        # wrapped with if because of pesky warnings
+        if np.sum(mask_free_to_stuck) > 0:
             T_stick_est = (np.sum(mask_free_to_free) / np.sum(mask_free_to_stuck) + 1) * dt
         else:
             T_stick_est = np.inf
-        if np.sum(mask_stuck_to_free)>0:
+        if np.sum(mask_stuck_to_free) > 0:
             T_unstick_est = (np.sum(mask_stuck_to_stuck) / np.sum(mask_stuck_to_free) + 1) * dt
         else:
             T_unstick_est = np.inf

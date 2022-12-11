@@ -8,10 +8,9 @@ from utils import backup_before_save, arr_of_length_of_true_segments,accuracy_of
 import time
 
 
-def generateSynthTrajs(N_steps, N_particle, dt, T_stick, T_unstick, D, A):
+def generateSynthTrajs(N_steps, N_particle, dt, T_stick, T_unstick, D, A,do_post_processing = False):
     generation_mode = GenerationMode.DONT_FORCE  # keep this
     init_S = None  # random
-    do_post_processing = False  # calculate some extra statistics, this takes a short while
     undersample_ratio = 0  # 0.1
     save_files = False
     is_parallel = False  # relevant only if do_post_processing==True
@@ -76,6 +75,8 @@ def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphi
     if do_graphics:
         N_rows = int(np.ceil(N_particle / 2))
         fig, ax = plt.subplots(N_rows, 2)
+        if len(ax)==2:
+            ax = np.reshape(np.asarray([ax]),(-1,2))
 
     X_arr_list = bayesianTools.extract_X_arr_list_from_df(df)
     dt_list = bayesianTools.extract_dt_list_from_df(df)
@@ -177,7 +178,8 @@ def test_em_viterbi(x0, x_true, X_arr_list, dt_list, is_parallel=False, save_fil
         save_string = "EM_output.npy"
         backup_before_save(save_string)
         np.save(save_string, output)
-    x_res = output[0][-1, :]
+    x_by_iter = output[0]
+    x_res = x_by_iter[-1, :]    
     L_by_iter = output[1]
     S_arr_list = output[2]
     X_tether_arr_list=output[3]
@@ -186,4 +188,4 @@ def test_em_viterbi(x0, x_true, X_arr_list, dt_list, is_parallel=False, save_fil
         print("ratio is {}".format(x_res / x_true))
         print("original ratio is {}".format(x0 / x_true))
         print("This took overall {} sec".format(time.time() - t))
-    return x_res,L_by_iter,S_arr_list,X_tether_arr_list
+    return x_res,x_by_iter,L_by_iter,S_arr_list,X_tether_arr_list

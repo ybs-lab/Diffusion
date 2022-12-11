@@ -259,10 +259,15 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
     prev_parameters = np.asarray([T_stick, T_unstick, D, A])  # for documentation
     model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
 
+    if verbose:
+        print("Initial parameters are [{:.2e}, {:.2e}, {:.2e}, {:.2e}]".format(
+            initial_parameters[0], initial_parameters[1], initial_parameters[2], initial_parameters[3]
+        ))
+
     for iter in range(max_iterations):
         # E step - find trajectories
         if verbose:
-            print("Iteration {} - E step".format(iter))
+            print("Starting iteration {} - E step".format(iter))
         if is_parallel:
             with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
                 for n, output in enumerate(
@@ -281,8 +286,6 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
 
         L_by_iter[iter] = np.sum(L_arr)
         # M step - find the parameters
-        if verbose:
-            print("Iteration {} - M step".format(iter))
         params_mat = np.zeros([N_particles, 4])
         for n in range(N_particles):
             params_mat[n, :] = model_get_optimal_parameters(
@@ -294,6 +297,11 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
         T_stick, T_unstick, D, A = params_est
         model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
         params_by_iter[iter + 1, :] = params_est
+        if verbose:
+            print("Done with iteration {} - M step".format(iter))
+            print("Current parameter estimates are [{:.2e}, {:.2e}, {:.2e}, {:.2e}]".format(
+                params_est[0],params_est[1],params_est[2],params_est[3]
+            ))
 
         if (iter > 0) and (np.abs(L_by_iter[iter] - L_by_iter[iter - 1]) / (
                 np.abs(L_by_iter[iter]) + np.abs(L_by_iter[iter - 1]))) < 1e-10:

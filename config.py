@@ -5,12 +5,15 @@ platform.platform()
 TRAJECTORIES_DIR = "./Trajectories"
 
 if platform.system().lower() == "linux":
-    DATA_DIR = "/mnt/sda1/AmitF/Diffusion_Data"
+    DATA_DIR = "/mnt/sda1/AmitF/Diffusion_Data/Data"
 else:
     DATA_DIR = "./Data"
 IMAGING_PARAMETERS_PATH = "./Resources/Parameters/imaging_parameters_table.csv"
 MODEL_PARAMETERS_PATH = "./Resources/Parameters/model_parameters_table.csv"
-OUTPUTS_DIR = "./Outputs/files"
+if platform.system().lower() == "linux":
+    OUTPUTS_DIR = "/mnt/sda1/AmitF/Diffusion_Data/Outputs/files"
+else:
+    OUTPUTS_DIR = "./Outputs/files"
 IMG4VID_DIR = "./Outputs/img4vid"
 
 DEFAULT_NEIGHBOR_THRESHOLD_UM = 4.  # for find_neighbors

@@ -1,5 +1,5 @@
 import os
-#Figure out which one of the two...
+# Figure out which one of the two...
 import cv2.cv2
 import cv2
 import numpy as np
@@ -198,10 +198,10 @@ def plot_G_dx_dt(df, direction="xy", group_by="experiment", dt=1, kind="kde", fi
 
 
 def plot_trajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarker=False,
-                     startAtOrigin=False, dispLegend=False, useDrawnLines=False, drawnLines=[], hideLines=False,
-                     alpha=1., curParticlePivotSize=0., multiColorLine=True, axForVelocityPlot=[],
-                     particlesForFixedColoring=[],
-                     **kwargs):
+                      startAtOrigin=False, dispLegend=False, useDrawnLines=False, drawnLines=[], hideLines=False,
+                      alpha=1., curParticlePivotSize=0., multiColorLine=True, axForVelocityPlot=[],
+                      particlesForFixedColoring=[], velocity_type="vel",
+                      **kwargs):
     # Plots the trajectories of all the particles in the dataframe
     # NOTE: on my PC this gets pretty slow with more than 200 particles
     #       so filter the dataframe before calling this (Todo: improve plotting to allow many trajectories)
@@ -347,7 +347,10 @@ def plot_trajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarke
 
         if plotVelocity:
             t = particle_df["t"].values
-            v = particle_df["dr2"].values / t
+            if velocity_type=="vel":
+                v = np.sqrt(particle_df["dr2"].values / np.hstack([0, np.diff(t) ** 2]))
+            else:
+                v = particle_df[velocity_type].values
             # t = t[1:]
             # v = v[1:]
 
@@ -356,7 +359,7 @@ def plot_trajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarke
             segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
             if plotVelocity:
-                vel_points = np.array([t, v]).T.reshape(-1, 1, 2)
+                vel_points = np.array([t, v], dtype='object').T.reshape(-1, 1, 2)
                 vel_segments = np.concatenate([vel_points[:-1], vel_points[1:]], axis=1)
 
             cmap = ListedColormap([color1, color2])
@@ -418,7 +421,8 @@ def plot_trajectories(df, groupby="particle", t_st=0, t_end=1e5, doneTrajNoMarke
                     vel_line.set_xdata(t)
                     vel_line.set_ydata(v)
             else:
-                line = ax.plot(x, y, color=color1, label=(groupby + ": " + str(particle_id)),alpha=(2.*alpha+1.)/3. )
+                line = ax.plot(x, y, color=color1, label=(groupby + ": " + str(particle_id)),
+                               alpha=(2. * alpha + 1.) / 3.)
                 line_array[i] = line[0]
                 if plotVelocity:
                     vel_line = axForVelocityPlot.plot(t, v, label=(groupby + ": " + str(particle_id)), marker="o")
@@ -582,9 +586,9 @@ def animate_trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
     max_frame = t_end_array[-1]
     # first plot the lines, then we only modify them for better runtime
     drawnLines = plot_trajectories(df, t_end=max_frame, doneTrajNoMarker=doneTrajNoMarker,
-                                  startAtOrigin=startAtOrigin,
-                                  dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[],
-                                  hideLines=True, axForVelocityPlot=axForVelocityPlot)
+                                   startAtOrigin=startAtOrigin,
+                                   dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[],
+                                   hideLines=True, axForVelocityPlot=axForVelocityPlot)
     if showFigure:
         fig.canvas.draw()
         plt.show(block=False)
@@ -592,9 +596,9 @@ def animate_trajectories(df, ax=[], t_end_array=np.arange(0, 201), startAtOrigin
     for i, t_end in enumerate(t_end_array):
 
         notebook_animate_traj(df, ax, t_end, max_frame, startAtOrigin=startAtOrigin, doneTrajNoMarker=doneTrajNoMarker,
-                            dispLegend=dispLegend, useDrawnLines=True, drawnLines=drawnLines, fps=fps,
-                            axForVelocityPlot=axForVelocityPlot, particlesForFixedColoring=particlesForFixedColoring,
-                            curParticlePivotSize=curParticlePivotSize)
+                              dispLegend=dispLegend, useDrawnLines=True, drawnLines=drawnLines, fps=fps,
+                              axForVelocityPlot=axForVelocityPlot, particlesForFixedColoring=particlesForFixedColoring,
+                              curParticlePivotSize=curParticlePivotSize)
         if showFigure:
             fig.canvas.draw()
             fig.canvas.flush_events()
@@ -791,7 +795,7 @@ def trajAxesLimits(df, startAtOrigin):
 
 
 def state_times_histogram(df=pd.DataFrame([]), times_df=pd.DataFrame([]), kind="kde", eqWeightParticles=True,
-                        log_scale=True, ax=[], save_files=False):
+                          log_scale=True, ax=[], save_files=False):
     if times_df.empty:  # create times_df from the normal input df
         experiments = df.experiment.unique()
         gb_exp = df.groupby("experiment")
@@ -915,15 +919,16 @@ def quick_traj(df, N_particles=1, t_end_array=np.arange(0, 101), ):
 
 
 def notebook_animate_traj(df, ax, t_end, max_frame, startAtOrigin=True, doneTrajNoMarker=True, dispLegend=False,
-                        useDrawnLines=False, drawnLines=[], fps=0., axForVelocityPlot=[], particlesForFixedColoring=[],
-                        curParticlePivotSize=0.):
+                          useDrawnLines=False, drawnLines=[], fps=0., axForVelocityPlot=[],
+                          particlesForFixedColoring=[],
+                          curParticlePivotSize=0.):
     # ax.cla()
     out_graphic_handles = plot_trajectories(df, t_end=t_end, doneTrajNoMarker=doneTrajNoMarker,
-                                           startAtOrigin=startAtOrigin,
-                                           dispLegend=False, ax=ax, useDrawnLines=useDrawnLines,
-                                           drawnLines=drawnLines, axForVelocityPlot=axForVelocityPlot,
-                                           particlesForFixedColoring=particlesForFixedColoring,
-                                           curParticlePivotSize=curParticlePivotSize)
+                                            startAtOrigin=startAtOrigin,
+                                            dispLegend=False, ax=ax, useDrawnLines=useDrawnLines,
+                                            drawnLines=drawnLines, axForVelocityPlot=axForVelocityPlot,
+                                            particlesForFixedColoring=particlesForFixedColoring,
+                                            curParticlePivotSize=curParticlePivotSize)
     if dispLegend:
         try:
             ax.get_figure().canvas.draw()
@@ -954,8 +959,9 @@ def notebook_animate_traj(df, ax, t_end, max_frame, startAtOrigin=True, doneTraj
 
 
 def overlay_trajectories_on_images(df, init_frame=0, last_frame=10000, particles="all", path=IMG4VID_DIR, dpi=100,
-                            header="EDITED_", curParticlePivotSize=25., inputType="video", forceFPS=0., alpha=0.2,
-                            writeEveryNFrames=1):
+                                   header="EDITED_", curParticlePivotSize=25., inputType="video", forceFPS=0.,
+                                   alpha=0.2,
+                                   writeEveryNFrames=1):
     plt.ioff()  # todo: find better solution than this...
 
     df = df.copy()
@@ -992,7 +998,7 @@ def overlay_trajectories_on_images(df, init_frame=0, last_frame=10000, particles
         else:
             fps = forceFPS
 
-        #If skipping frames (for speed) maintain same number of frames per second
+        # If skipping frames (for speed) maintain same number of frames per second
         fps = fps / writeEveryNFrames
 
         N_frames = int(vidcap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -1004,11 +1010,11 @@ def overlay_trajectories_on_images(df, init_frame=0, last_frame=10000, particles
         frame = 0
         print("Reading video file...")
         while success:
-            if (frame >= init_frame) & (frame <= last_frame) & (((frame-init_frame) % writeEveryNFrames) == 0):
+            if (frame >= init_frame) & (frame <= last_frame) & (((frame - init_frame) % writeEveryNFrames) == 0):
                 if isnotebook():
-                    print("Plotting trajectories for frame no. {} of {}".format(1+frame, last_frame), end="\r")
+                    print("Plotting trajectories for frame no. {} of {}".format(1 + frame, last_frame), end="\r")
                 else:
-                    print("Plotting trajectories for frame no. {} of {}".format(1+frame, last_frame))
+                    print("Plotting trajectories for frame no. {} of {}".format(1 + frame, last_frame))
 
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # flip colors opencv->matplotlib
 
@@ -1019,10 +1025,10 @@ def overlay_trajectories_on_images(df, init_frame=0, last_frame=10000, particles
                 fig.add_axes(ax)
                 ax.imshow(image, aspect='auto')
                 plot_trajectories(df, t_st=init_frame, t_end=frame, doneTrajNoMarker=True, startAtOrigin=False,
-                                 dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[], multiColorLine=False,
-                                 hideLines=False, axForVelocityPlot=[],
-                                 curParticlePivotSize=curParticlePivotSize, particlesForFixedColoring=particles,
-                                 alpha=alpha)
+                                  dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[], multiColorLine=False,
+                                  hideLines=False, axForVelocityPlot=[],
+                                  curParticlePivotSize=curParticlePivotSize, particlesForFixedColoring=particles,
+                                  alpha=alpha)
                 fig.canvas.draw()
 
                 # from matplotlib to cv2
@@ -1067,9 +1073,9 @@ def overlay_trajectories_on_images(df, init_frame=0, last_frame=10000, particles
                 ax.imshow(image, aspect='auto')
 
                 plot_trajectories(df, t_st=init_frame, t_end=cur_frame, doneTrajNoMarker=True, startAtOrigin=False,
-                                 dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[], multiColorLine=False,
-                                 hideLines=False, axForVelocityPlot=[],
-                                 curParticlePivotSize=curParticlePivotSize, particlesForFixedColoring=particles)
+                                  dispLegend=False, ax=ax, useDrawnLines=False, drawnLines=[], multiColorLine=False,
+                                  hideLines=False, axForVelocityPlot=[],
+                                  curParticlePivotSize=curParticlePivotSize, particlesForFixedColoring=particles)
 
                 fig.savefig(os.path.join(path, header + f), dpi=dpi)
 

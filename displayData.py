@@ -149,7 +149,7 @@ def plot_G_dx_dt(df, direction="xy", group_by="experiment", dt=1, kind="kde", fi
             cur_df = pd.DataFrame({"dx": dx, "dy": dy, "invTrajDuration": invTrajDuration})
         cur_df["dt"] = dt
         cur_df[group_by] = key
-        G = G.append(cur_df)
+        G = pd.concat([G,cur_df])
 
     G = G.reset_index()
     dx_name = "d" + direction  # this can be dx or dy

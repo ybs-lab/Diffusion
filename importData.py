@@ -131,7 +131,7 @@ def generate_diffuse_tether_trajectories(T_stick, T_unstick, D, A, dt=1. / 30., 
                              break_trajectory_at_collisions=False,
                              undersampleLongTrajectories=False)
     else:  # just do a very minimal post_processing
-        df = scale_units(df, None)
+        df = scale_units(df, None,fps=1/dt)
         df = add_displacement(df, "x")
         df = add_displacement(df, "y")
         df = add_displacement(df, "t")  # must for bayesianTools
@@ -405,12 +405,15 @@ def interpolate_padding(df, is_parallel=False):
     return df
 
 
-def scale_units(df_in, imaging_params_path):
+def scale_units(df_in, imaging_params_path,fps=None):
+
     default_fps = 30.
     default_micron2pix = 0.097
 
     if df_in.experiment.unique()[0].lower() == "synthetic":
         default_micron2pix = 1.
+        if fps is not None:
+            default_fps = fps
 
     df = df_in.copy()
 

@@ -64,7 +64,7 @@ def create_heatmaps(df, model_params, create_D_A_heatmap=True, D_A_grid=np.logsp
     print("Done with heatmaps!")
 
 
-def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphics=True, save_files=True):
+def compare_true_and_viterbi_paths(df, model_params, max_particles=10, do_graphics=True, save_files=False):
     N_particle = len(df.particle.unique())
 
     if do_graphics and (N_particle > max_particles):

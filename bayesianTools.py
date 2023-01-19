@@ -3,13 +3,13 @@ from concurrent.futures import ProcessPoolExecutor
 from itertools import repeat
 import scipy
 
+import model
 from config import MAX_PROCESSORS_LIMIT, MAX_AVAILABLE_STATES_TO_KEEP, FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO
 from model import model_transition_log_probability, pack_model_params, model_get_optimal_parameters
 import numba
 
-
-@numba.jit(nopython=True)
-def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
+# @numba.jit(nopython=True)
+def viterbi_algorithm(X_arr, model_params, do_backprop=True, k_best=1):
     """
     Given a particle's series of observed positions X_arr, and model parameters, find the most likely sequence of hidden
     states S and X_tether.
@@ -65,18 +65,18 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
 
     # Log-likelihood matrix L_mat[i,n] is the log-likelihood of the most likely path that
     # reaches state i at time n (n time points so this is the sum of n-1 step contributions + initial condition)
-    L_mat = np.zeros((K, N), dtype=np.float32)
+    L_mat = np.zeros((K, N,k_best ), dtype=np.float32)
 
     # State matrix S_mat[i,n] is the most likely state at time n-1 which leads to state i (at time n).
     # Assign -1 to everything as this is not a valid state.
-    S_mat = np.zeros((K, N), dtype=np.int32) - 1
+    S_mat = np.zeros((K, N,k_best ), dtype=np.int32) - 1
 
     # More parameters
     squared_distance_discard_threshold = FORGET_FAR_TETHER_POINTS_THRESHOLD_RATIO * model_params.A  # For the first filter
     # Initialize: equal prior for stuck or free at time 0 (leave L[:,0]=0)
     # all unreached end destinations are by default with 0 probability, and only if we reach them then their probability
     # is to be considered (some states won't be reached due to the paths discarding).
-    L_mat[:, - 1] = -np.inf
+    L_mat[:, - 1,:] = -np.inf
 
     hidden_states_list = np.arange(K, dtype=np.int32)
     valid_hidden_states_mask = np.zeros(K, dtype=np.bool_)  # must have np.bool_ and not np.bool for numba to work!
@@ -93,7 +93,7 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
             nonfree_valid_hidden_states = hidden_states_list[valid_hidden_states_mask][1:]
             valid_hidden_states_mask[
                 nonfree_valid_hidden_states[
-                    np.argsort(L_mat[nonfree_valid_hidden_states, n - 1])
+                    np.argsort(L_mat[nonfree_valid_hidden_states, n - 1,0])
                 ][: -(MAX_AVAILABLE_STATES_TO_KEEP - 2)]] = False
 
         # Allow for the recently stuck at n-1 state to be valid. The free state is always valid.
@@ -106,42 +106,48 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
         for j in available_source_hidden_states:
             if j == 0:  # only the free state has multiple paths leading to it (more than one source state)
                 # Choose the best path to j from all available states i - this is the Viterbi algorithm!
-                logL_paths_to_j = L_mat[available_source_hidden_states, n - 1] + \
-                                  model_transition_log_probability(S_prev=available_source_hidden_states, S_curr=j,
-                                                                   X_prev=X_arr[n - 1], X_curr=X_arr[n],
-                                                                   X_tether_prev=X_arr[
-                                                                       available_source_hidden_states - 1],
-                                                                   model_params=model_params)
-                #               transition_log_probability_viterbi(
-                # model_params, X_arr, n, available_source_hidden_states, j)
-                ind_max = np.argmax(logL_paths_to_j)
-                S_mat[j, n] = available_source_hidden_states[ind_max]
-                L_mat[j, n] = logL_paths_to_j[ind_max]
+                logL_paths_to_j = (L_mat[available_source_hidden_states, n - 1,:].T + \
+                                   model_transition_log_probability(S_prev=available_source_hidden_states, S_curr=j,
+                                                                    X_prev=X_arr[n - 1], X_curr=X_arr[n],
+                                                                    X_tether_prev=X_arr[
+                                                                        available_source_hidden_states - 1],
+                                                                    model_params=model_params)).T
+
+                sort_indices = np.argsort(logL_paths_to_j.flatten())
+                for k in range(k_best):
+                    ind_kth_max = np.unravel_index(sort_indices[-(k + 1)], logL_paths_to_j.shape)
+                    S_mat[j, n, k] = available_source_hidden_states[ind_kth_max[0]]
+                    L_mat[j, n, k] = logL_paths_to_j[ind_kth_max]
+                # ind_max = np.argmax(logL_paths_to_j)
+                # S_mat[j, n,0] = available_source_hidden_states[ind_max]
+                # L_mat[j, n,0] = logL_paths_to_j[ind_max]
 
             else:
                 # for 0<j<n+1, can only get to j from j (stuck in the same place)
                 # as long as this i is still valid (very far tether points are forgotten)
-                S_mat[j, n] = j
-                L_mat[j, n] = L_mat[j, n - 1] + \
-                              model_transition_log_probability(S_prev=j, S_curr=j,
-                                                               X_prev=X_arr[n - 1], X_curr=X_arr[n],
-                                                               X_tether_prev=X_arr[
-                                                                   j - 1],
-                                                               model_params=model_params)
+                for k in range(k_best):
+                    S_mat[j, n,k] = j
+                    L_mat[j, n,k] = L_mat[j, n - 1,k] + \
+                                  model_transition_log_probability(S_prev=j, S_curr=j,
+                                                                   X_prev=X_arr[n - 1], X_curr=X_arr[n],
+                                                                   X_tether_prev=X_arr[
+                                                                       j - 1],
+                                                                   model_params=model_params)
                 # transition_log_probability_viterbi(model_params, X_arr, n, j, j)
         # In addition consider the sticking from free (i=0) to stuck at location j (state j=n+1)
-        S_mat[n + 1, n] = 0
-        L_mat[n + 1, n] = L_mat[0, n - 1] + \
-                          model_transition_log_probability(S_prev=0, S_curr=n + 1,
-                                                           X_prev=X_arr[n - 1], X_curr=X_arr[n],
-                                                           X_tether_prev=X_arr[n - 1],  # this has no meaning here
-                                                           model_params=model_params)
+        for k in range(k_best):
+            S_mat[n + 1, n,k] = 0
+            L_mat[n + 1, n,k] = L_mat[0, n - 1,k] + \
+                              model_transition_log_probability(S_prev=0, S_curr=n + 1,
+                                                               X_prev=X_arr[n - 1], X_curr=X_arr[n],
+                                                               X_tether_prev=X_arr[n - 1],  # this has no meaning here
+                                                               model_params=model_params)
 
         # transition_log_probability_viterbi(model_params, X_arr, n, 0, n + 1)
     # 3. Matrices are filled - now we backprop to the start to find the path itself:
     # We find the best end point and then trace it back to obtain the full path
-    viterbi_path_final_state = np.argmax(L_mat[:, - 1])
-    viterbi_path_log_likelihood = L_mat[viterbi_path_final_state, - 1]
+    viterbi_path_final_state = np.argmax(L_mat[:, - 1],0)
+    viterbi_path_log_likelihood = L_mat[viterbi_path_final_state, - 1,0]
 
     if do_backprop:
         # Find the best trajectory and not just the best path's likelihood
@@ -151,7 +157,7 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
         viterbi_path[N - 1] = viterbi_path_final_state
         # Now follow along state matrix S_mat
         for n in np.flip(np.arange(1, N, dtype=np.int32)):
-            viterbi_path[n - 1] = S_mat[viterbi_path[n], n]
+            viterbi_path[n - 1] = S_mat[viterbi_path[n], n,0]
 
         # Now convert this from the indices i to S and X_tether:
         # (for efficiency we don't use ind2state for this part)
@@ -168,11 +174,15 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, ):
         S_arr = None
         X_tether_arr = None
 
-    return S_arr, X_tether_arr, viterbi_path_log_likelihood
+    return S_arr, X_tether_arr, viterbi_path_log_likelihood,L_mat,S_mat
 
 
 def extract_X_arr_list_from_df(df):
     return np.asarray([particle_df[["x", "y"]].values for _, particle_df in df.groupby("particle")])
+
+
+def extract_S_arr_list_from_df(df):
+    return np.asarray([particle_df["state"].values for _, particle_df in df.groupby("particle")])
 
 
 def extract_dt_list_from_df(df):
@@ -224,7 +234,7 @@ def multiple_trajectories_likelihood(X_arr_list, dt_list, T_stick: float, T_unst
 
 
 def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: float, D: float, A: float,
-                            is_parallel=False, max_iterations=100,verbose=False):
+                            is_parallel=False, max_iterations=100, verbose=False):
     """
     Args:
         X_arr_list (Nx1 list of matrices): list of the observed positions of all particles - each element of the list is
@@ -285,7 +295,9 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
                 L_arr[n] = output[2]
 
         L_by_iter[iter] = np.sum(L_arr)
+
         # M step - find the parameters
+
         params_mat = np.zeros([N_particles, 4])
         for n in range(N_particles):
             params_mat[n, :] = model_get_optimal_parameters(
@@ -293,6 +305,10 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
         params_mat[~np.isfinite(params_mat)] = np.nan
         params_est = np.nanmean(params_mat, axis=0)
         params_est[~np.isfinite(params_est)] = prev_parameters[~np.isfinite(params_est)]
+
+        # params_est = solver_get_optimal_parameters(dt,S_arr_list,X_arr_list,
+        #                                            [T_stick,T_unstick,D,A])
+
         prev_parameters = params_est.copy()
         T_stick, T_unstick, D, A = params_est
         model_params = pack_model_params(T_stick, T_unstick, D, A, dt)
@@ -300,15 +316,15 @@ def em_viterbi_optimization(X_arr_list, dt_list, T_stick: float, T_unstick: floa
         if verbose:
             print("Done with iteration {} - M step".format(iter))
             print("Current parameter estimates are [{:.2e}, {:.2e}, {:.2e}, {:.2e}]".format(
-                params_est[0],params_est[1],params_est[2],params_est[3]
+                params_est[0], params_est[1], params_est[2], params_est[3]
             ))
 
         if (iter > 0) and (np.abs(L_by_iter[iter] - L_by_iter[iter - 1]) / (
-                np.abs(L_by_iter[iter]) + np.abs(L_by_iter[iter - 1]))) < 1e-10:
+                np.abs(L_by_iter[iter]) + np.abs(L_by_iter[iter - 1]))) < 1e-2:
             break
 
-    params_by_iter = params_by_iter[:(iter + 1), :]
-    L_by_iter = L_by_iter[:iter]
+    params_by_iter = params_by_iter[:(iter + 2), :]
+    L_by_iter = L_by_iter[:(iter + 1)]
 
     return params_by_iter, L_by_iter, S_arr_list, X_tether_arr_list
 
@@ -422,3 +438,35 @@ def matrix_gd_scheme(X_arr, model_params):
 
     gradients = np.sum(grads_arr, axis=0)
     return L, gradients
+
+
+def multiple_trajectories_log_probability(S_arr_list, X_arr_list, model_params: dict):
+    L_arr = np.zeros(len(S_arr_list))
+    with ProcessPoolExecutor(max_workers=MAX_PROCESSORS_LIMIT) as executor:
+        for n, output in enumerate(
+                executor.map(model.model_trajectory_log_probability, S_arr_list, X_arr_list, repeat(model_params),
+                             )):
+            L_arr[n] = output
+    return np.sum(L_arr)
+
+
+def solver_get_optimal_parameters(dt, S_arr_list, X_arr_list, x0,
+                                  cons_min=[0.1, 0.1, 0.01, 0.0001],
+                                  cons_max=[100., 100., 10., 10.], ):
+    def optimize_this(x):
+        TT_stick, TT_unstick, DD, AA = x
+        return -multiple_trajectories_log_probability(S_arr_list, X_arr_list,
+                                                      model.pack_model_params(TT_stick, TT_unstick, DD,
+                                                                              AA, dt))
+
+    cons = [{'type': 'ineq', 'fun': lambda x: x[0] - cons_min[0]},
+            {'type': 'ineq', 'fun': lambda x: x[1] - cons_min[1]},
+            {'type': 'ineq', 'fun': lambda x: x[2] - cons_min[2]},
+            {'type': 'ineq', 'fun': lambda x: x[3] - cons_min[3]},
+            {'type': 'ineq', 'fun': lambda x: -(x[0] - cons_max[0])},
+            {'type': 'ineq', 'fun': lambda x: -(x[1] - cons_max[1])},
+            {'type': 'ineq', 'fun': lambda x: -(x[2] - cons_max[2])},
+            {'type': 'ineq', 'fun': lambda x: -(x[3] - cons_max[3])}, ]
+
+    result = scipy.optimize.minimize(optimize_this, x0=x0, constraints=cons)
+    return result.x

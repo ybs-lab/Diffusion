@@ -20,7 +20,7 @@ def viterbi_algorithm(X_arr, model_params, do_backprop=True, k_best=1):
     of the trajectory, there are n+2 possible states: free, or still stuck at X[n], or stuck at X[n-1], and so on until
     still stuck at X[0]. So overall for the trajectory of length N, there are N+1 possible states (N+1 = (N-1)+2).
 
-    We define a hidden state index (i and j) as follows: i=0 is, and i=k is stuck at X[k-1], so 0<=i<=K=N+1.
+    We define a hidden state index (i and j) as follows: i=0 is free, and i=k is stuck at X[k-1], so 0<=i<=K=N+1.
     Each of this indices, along with a time tag n, can be converted to the appropriate model State by adding the
     particle position X_arr[n] to the hidden state. Then the model can be used to calculate the likelihood of transition
     between two States.
